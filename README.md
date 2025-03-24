@@ -2,6 +2,8 @@
 
 High Performance Microsoft SQL Server (MS-SQL Server) Driver for Dart (32 & 64bits)
 
+####  forked from MoacirSchmidt/dart_mssql
+
 # Important
 
 - This package is not suitable for flutter or web projects. It only runs on server-side apps.
