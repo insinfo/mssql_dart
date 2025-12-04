@@ -9,9 +9,9 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:galileo_utf/galileo_utf.dart';
 import 'package:tuple/tuple.dart';
 
 // -----------------------------------------------------------------------------
@@ -397,6 +397,21 @@ String tdsQuoteId(String ident) {
   return "[${ident.replaceAll("]", "]]")}]";
 }
 
+const Set<int> progErrors = {
+  102,
+  207,
+  208,
+  2812,
+  4104,
+};
+
+const Set<int> integrityErrors = {
+  515,
+  547,
+  2601,
+  2627,
+};
+
 /// Função identidade para valores (equivalente a ord() em Python).
 int myOrd(dynamic val) => val;
 
@@ -422,9 +437,15 @@ class Error implements Exception {
   String toString() => "Error: $message";
 }
 
+class InterfaceError extends Error {
+  InterfaceError(String message) : super(message);
+}
+
+typedef TimeoutError = TimeoutException;
+
 class DatabaseError extends Error {
   int msgNo = 0;
-  String text = "";
+  String text;
   String srvName = "";
   String procName = "";
   int number = 0;
@@ -432,7 +453,9 @@ class DatabaseError extends Error {
   int state = 0;
   int line = 0;
 
-  DatabaseError(String message, [dynamic exc]) : super(message);
+  DatabaseError(String message, [dynamic exc])
+      : text = message,
+        super(message);
 
   String get message {
     if (procName.isNotEmpty) {
@@ -443,11 +466,11 @@ class DatabaseError extends Error {
   }
 }
 
-class ClosedConnectionError extends DatabaseError {
+class ClosedConnectionError extends InterfaceError {
   ClosedConnectionError() : super("Server closed connection");
 }
 
-class DataError extends DatabaseError {
+class DataError extends Error {
   DataError(String message) : super(message);
 }
 
@@ -553,48 +576,68 @@ final InternalProc SP_EXECUTE = InternalProc(TDS_SP_EXECUTE, "sp_execute");
 
 /// Lê exatamente [size] bytes do stream [stm] e ignora-os.
 /// Se EOF for alcançado antes, lança ClosedConnectionError.
-Future<void> skipall(Socket stm, int size) async {
-  // Esta implementação é apenas ilustrativa; uma leitura adequada dependerá da API usada.
-  List<int> res = await stm.first;
-  if (res.length == size) return;
-  if (res.isEmpty) throw ClosedConnectionError();
-  int left = size - res.length;
+void skipall(TransportProtocol stm, int size) {
+  final res = stm.recv(size);
+  if (res.length == size) {
+    return;
+  }
+  if (res.isEmpty) {
+    throw ClosedConnectionError();
+  }
+  var left = size - res.length;
   while (left > 0) {
-    List<int> buf = await stm.first;
-    if (buf.isEmpty) throw ClosedConnectionError();
+    final buf = stm.recv(left);
+    if (buf.isEmpty) {
+      throw ClosedConnectionError();
+    }
     left -= buf.length;
   }
 }
 
-/// Retorna um Stream que gera pedaços (chunks) de [size] bytes lidos do stream [stm].
-Stream<List<int>> readChunks(Socket stm, int size) async* {
+/// Retorna um Iterable que gera pedaços (chunks) de [size] bytes lidos do stream [stm].
+Iterable<List<int>> readChunks(TransportProtocol stm, int size) sync* {
   if (size == 0) {
-    yield [];
+    yield <int>[];
     return;
   }
-  List<int> res = await stm.first;
-  if (res.isEmpty) throw ClosedConnectionError();
+  final res = stm.recv(size);
+  if (res.isEmpty) {
+    throw ClosedConnectionError();
+  }
   yield res;
-  int left = size - res.length;
+  var left = size - res.length;
   while (left > 0) {
-    List<int> buf = await stm.first;
-    if (buf.isEmpty) throw ClosedConnectionError();
+    final buf = stm.recv(left);
+    if (buf.isEmpty) {
+      throw ClosedConnectionError();
+    }
     yield buf;
     left -= buf.length;
   }
 }
 
 /// Lê exatamente [size] bytes do stream [stm].
-Future<List<int>> readall(Socket stm, int size) async {
-  var chunks = await readChunks(stm, size).toList();
-  return joinByteArrays(chunks);
+List<int> readall(TransportProtocol stm, int size) {
+  return joinByteArrays(readChunks(stm, size));
 }
 
 /// Uma versão “rápida” de readall para dados pequenos.
 /// Retorna uma tupla com a lista de bytes e um offset (0 neste placeholder).
-Future<Tuple2<List<int>, int>> readallFast(Socket stm, int size) async {
-  List<int> buf = await readall(stm, size);
-  return Tuple2(buf, 0);
+Tuple2<List<int>, int> readallFast(TransportProtocol stm, int size) {
+  var buf = stm.recv(size);
+  if (buf.length >= size) {
+    return Tuple2(buf, 0);
+  }
+
+  final aggregated = List<int>.from(buf);
+  while (aggregated.length < size) {
+    final chunk = stm.recv(size - aggregated.length);
+    if (chunk.isEmpty) {
+      throw ClosedConnectionError();
+    }
+    aggregated.addAll(chunk);
+  }
+  return Tuple2(aggregated, 0);
 }
 
 /// Retorna o total de segundos de um Duration.
@@ -722,12 +765,9 @@ final defaultValue = _Default();
 // tds7_crypt_pass: "Mangle" a senha conforme as regras TDS.
 // -----------------------------------------------------------------------------
 List<int> tds7CryptPass(String password) {
-  // Em Python usa-se ucs2_codec para codificar em UTF-16LE.
-  // Aqui, como placeholder, usamos utf8.encode; em produção, substitua por um codec UTF-16LE apropriado.
-  List<int> encoded = utf8.encode(password);
-  List<int> mangled = List<int>.from(encoded);
+  final mangled = List<int>.from(encodeUtf16le(password, false));
   for (int i = 0; i < mangled.length; i++) {
-    int ch = mangled[i];
+    final ch = mangled[i];
     mangled[i] = (((ch << 4) & 0xFF) | (ch >> 4)) ^ 0xA5;
   }
   return mangled;
@@ -736,7 +776,7 @@ List<int> tds7CryptPass(String password) {
 // -----------------------------------------------------------------------------
 // _TdsLogin Class
 // -----------------------------------------------------------------------------
-class _TdsLogin {
+class TdsLogin {
   String clientHostName = "";
   String library = "";
   String serverName = "";
@@ -784,7 +824,7 @@ class Tuple3<T1, T2, T3> {
 // -----------------------------------------------------------------------------
 // _TdsEnv Class
 // -----------------------------------------------------------------------------
-class _TdsEnv {
+class TdsEnv {
   String? database;
   String? language;
   String? charset;
@@ -795,27 +835,29 @@ class _TdsEnv {
 // -----------------------------------------------------------------------------
 // _create_exception_by_message
 // -----------------------------------------------------------------------------
-// DatabaseError createExceptionByMessage(Map<String, dynamic> msg, {String? customErrorMsg}) {
-//   int msgNo = msg["msgno"];
-//   String errorMsg = customErrorMsg ?? msg["message"];
-//   DatabaseError ex;
-//   if (progErrors.contains(msgNo)) {
-//     ex = ProgrammingError(errorMsg);
-//   } else if (integrityErrors.contains(msgNo)) {
-//     ex = IntegrityError(errorMsg);
-//   } else {
-//     ex = OperationalError(errorMsg);
-//   }
-//   ex.msgNo = msg["msgno"];
-//   ex.text = msg["message"];
-//   ex.srvName = msg["server"];
-//   ex.procName = msg["proc_name"];
-//   ex.number = msg["msgno"];
-//   ex.severity = msg["severity"];
-//   ex.state = msg["state"];
-//   ex.line = msg["line_number"];
-//   return ex;
-// }
+DatabaseError createExceptionByMessage(Message msg, {String? customErrorMsg}) {
+  final msgNo = msg["msgno"] as int? ?? 0;
+  final errorMsg = customErrorMsg ?? (msg["message"] as String? ?? "");
+
+  DatabaseError ex;
+  if (progErrors.contains(msgNo)) {
+    ex = ProgrammingError(errorMsg);
+  } else if (integrityErrors.contains(msgNo)) {
+    ex = IntegrityError(errorMsg);
+  } else {
+    ex = OperationalError(errorMsg);
+  }
+
+  ex.msgNo = msgNo;
+  ex.text = msg["message"] as String? ?? errorMsg;
+  ex.srvName = msg["server"] as String? ?? "";
+  ex.procName = msg["proc_name"] as String? ?? "";
+  ex.number = msgNo;
+  ex.severity = msg["severity"] as int? ?? 0;
+  ex.state = msg["state"] as int? ?? 0;
+  ex.line = msg["line_number"] as int? ?? 0;
+  return ex;
+}
 
 // Message e Route são representados como Map<String, dynamic>
 typedef Message = Map<String, dynamic>;

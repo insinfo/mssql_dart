@@ -1,12 +1,33 @@
 import 'dart:convert';
 
+import 'package:galileo_utf/galileo_utf.dart' as gal_utf;
+import 'package:mssql_dart/third_party/enough_convert/big5.dart'
+  as conv_big5;
+import 'package:mssql_dart/third_party/fl_charset/fl_charset.dart' as char;
+
 const int TDS_CHARSET_ISO_8859_1 = 1;
 const int TDS_CHARSET_CP1251 = 2;
 const int TDS_CHARSET_CP1252 = 3;
 const int TDS_CHARSET_UCS_2LE = 4;
 const int TDS_CHARSET_UNICODE = 5;
 
-final ucs2_codec = utf8; // Para um suporte real a UTF-16LE, use um codec apropriado.
+const Encoding ucs2Codec = _Utf16leEncoding();
+
+const _ucs2Names = <String>{
+  'unicode',
+  'ucs-2',
+  'ucs2',
+  'ucs-2le',
+  'utf-16le',
+};
+
+final Map<String, Encoding> _collationCharsetOverrides = {
+  'cp932': char.shiftJis,
+  'cp950': conv_big5.big5,
+  'windows-950': conv_big5.big5,
+  'ms950': conv_big5.big5,
+  'big5': conv_big5.big5,
+};
 
 /// Mapeia o sort_id para o charset conforme a tabela original.
 String sortid2charset(int sortId) {
@@ -186,29 +207,7 @@ class Collation {
 
   /// Retorna um objeto [Encoding] correspondente ao charset.
   Encoding get_codec() {
-    // Aqui é usada uma simples mapeamento – para uma implementação completa, considere usar pacotes que forneçam esses codecs.
-    String charset = get_charset().toUpperCase();
-    switch (charset) {
-      case 'CP437':
-      case 'CP850':
-      case 'CP1250':
-      case 'CP1251':
-      case 'CP1253':
-      case 'CP1254':
-      case 'CP1255':
-      case 'CP1256':
-      case 'CP1257':
-      case 'CP1258':
-      case 'CP874':
-      case 'CP932':
-      case 'CP936':
-      case 'CP949':
-      case 'CP950':
-        return utf8; // Fallback – ajuste conforme necessário.
-      case 'CP1252':
-      default:
-        return latin1;
-    }
+    return _resolveEncoding(get_charset());
   }
 
   @override
@@ -231,3 +230,54 @@ final raw_collation = Collation(
   binary2: false,
   version: 0,
 );
+
+Encoding _resolveEncoding(String charset) {
+  final normalized = charset.toLowerCase();
+  if (_ucs2Names.contains(normalized)) {
+    return ucs2Codec;
+  }
+
+  final override = _collationCharsetOverrides[normalized];
+  if (override != null) {
+    return override;
+  }
+
+  final encoding = char.Charset.getByName(normalized);
+  if (encoding != null) {
+    return encoding;
+  }
+
+  final fallback = Encoding.getByName(normalized);
+  if (fallback != null) {
+    return fallback;
+  }
+
+  return latin1;
+}
+
+class _Utf16leEncoding extends Encoding {
+  const _Utf16leEncoding();
+
+  @override
+  Converter<List<int>, String> get decoder => const _Utf16leDecoder();
+
+  @override
+  Converter<String, List<int>> get encoder => const _Utf16leEncoder();
+
+  @override
+  String get name => 'utf-16le';
+}
+
+class _Utf16leEncoder extends Converter<String, List<int>> {
+  const _Utf16leEncoder();
+
+  @override
+  List<int> convert(String input) => gal_utf.encodeUtf16le(input, false);
+}
+
+class _Utf16leDecoder extends Converter<List<int>, String> {
+  const _Utf16leDecoder();
+
+  @override
+  String convert(List<int> input) => gal_utf.decodeUtf16le(input, 0, null, false);
+}
