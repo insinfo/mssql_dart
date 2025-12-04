@@ -27,15 +27,15 @@ const int TDS73B = 0x730B0003;
 const int TDS74 = 0x74000004;
 
 // Funções para verificar a versão do TDS.
-// Assume-se que a classe _TdsSession (definida em outro módulo) possua o campo tdsVersion.
-abstract class _TdsSession {
+// Assume-se que a classe [TdsSessionContract] (definida em outro módulo) possua o campo tdsVersion.
+abstract class TdsSessionContract {
   int get tdsVersion;
 }
 
-bool isTds7Plus(_TdsSession session) => session.tdsVersion >= TDS70;
-bool isTds71Plus(_TdsSession session) => session.tdsVersion >= TDS71;
-bool isTds72Plus(_TdsSession session) => session.tdsVersion >= TDS72;
-bool isTds73Plus(_TdsSession session) => session.tdsVersion >= TDS73A;
+bool isTds7Plus(TdsSessionContract session) => session.tdsVersion >= TDS70;
+bool isTds71Plus(TdsSessionContract session) => session.tdsVersion >= TDS71;
+bool isTds72Plus(TdsSessionContract session) => session.tdsVersion >= TDS72;
+bool isTds73Plus(TdsSessionContract session) => session.tdsVersion >= TDS73A;
 
 // -----------------------------------------------------------------------------
 // Packet Types

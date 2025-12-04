@@ -4,6 +4,9 @@ import 'dart:typed_data';
 import 'collate.dart';
 import 'tds_base.dart' as tds;
 
+/// Factory para construir objetos de timezone customizados a partir do offset em minutos.
+typedef TzInfoFactory = Object? Function(int offsetMinutes);
+
 /// Represents an abstract SQL type.
 abstract class SqlType {
   const SqlType();
