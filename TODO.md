@@ -37,13 +37,16 @@ use o comando rg para buscar no codigo fonte
 - [x] 2025-12-05: `_TdsSession` ganhou esqueleto de RPC (`submitRpc`/`processRpc`/`completeRpc`/`findReturnStatus`) e agora parseia tokens `RETURNVALUE`; suporte a parâmetros continua bloqueado até que `SerializerFactory` produza `TYPE_INFO` + valores reais.
 - [x] 2025-12-05: Implementada camada DB-API mínima (`DbConnection`/`DbCursor`) com helper `dbConnectSync`, reaproveitando `TdsCursor` para expor `execute`/`fetch*`/`nextset` de maneira amigável ao usuário.
 - [x] 2025-12-05: Novo `test/integration/dbapi_workflow_test.dart` cobre `DbConnection.execute`, workflows DDL/DML via `DbCursor` e navegação com `nextset`.
+- [x] 2025-12-05: Criado equivalente assíncrono (`AsyncDbConnection`/`AsyncDbCursor`) reutilizando `AsyncTdsSession`, garantindo serialização via `runSerial` e adicionando `dbConnectAsync`.
+- [x] 2025-12-05: Adicionadas baterias de testes para o DB-API assíncrono (`async_dbapi_workflow_test.dart`), incluindo verificação de `nextset` e serialização de execuções concorrentes.
+- [x] 2025-12-05: `TdsCursor`/`AsyncTdsCursor` e respective DB-APIs ganharam `executemany` com acumulação de `rowcount`, aceitando listas ou mapas de parâmetros.
 - [ ] Próximo ciclo (quebrado em etapas):
 	1. Portar `pytds/tls.py` (`establish_channel`/`revert_to_clear`), usando `SecureSocket` ou wrapper síncrono e expondo swap de transporte em `SocketTransport`.
 	2. Completar `_TdsSession`: escrever parâmetros RPC reais (TYPE_INFO + payload via `SerializerFactory`), liberar parâmetros de saída/byref, cancelamentos e transações.
 	3. Finalizar serializers reais em `tds_types.dart`/`tds_base.dart` e ligá-los ao processamento de colunas/parâmetros.
 	4. Só então portar TLS avançado + MARS (`smp.py`) para destravar múltiplas sessões simultâneas.
 	5. Usar os traces (Python x Dart) para validar ordem de tokens/tipos e alimentar os testes de integração antes de liberar parsing de linhas reais.
-	6. Portar a camada DB-API de `pytds.connection`/`pytds.cursor`: conexões com autocommit/isolation level, `Cursor.execute`/`executemany`/`callproc`, `get_proc_outputs`, streaming de resultados, `copy_to` e contexto `with` (precisa de uma API pública equivalente ao `pytds.connect`).
+	6. Portar a camada DB-API de `pytds.connection`/`pytds.cursor`: conexões com autocommit/isolation level, `Cursor.execute`/`callproc`, `get_proc_outputs`, streaming de resultados, `copy_to` e contexto `with` (precisa de uma API pública equivalente ao `pytds.connect`).
 	7. Implementar pipeline completo de parâmetros/RPC igual ao `_TdsSession.execute` do Python: parametrização segura (`%s`/nomeados), `sp_executesql`, `InternalProc`, saída/entrada, `return_status`, table-valued parameters e `executemany` batching.
 	8. Portar utilidades de pool/reuso e roteamento: `connection_pool.py`, `LoadBalancer`, failover partner, integração com `connection_pool.connection_pool` e `NonMarsConnection`/`MarsConnection`.
 	9. Implementar `SmpManager`/MARS de `pytds.smp` + `tds_socket.create_session`, liberando múltiplos cursores simultâneos e cancelamentos independentes.

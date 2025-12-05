@@ -10,6 +10,7 @@ import 'async_operation_lock.dart';
 import 'collate.dart';
 import 'row_strategies.dart';
 import 'session_link.dart';
+import 'sp_executesql_builder.dart';
 import 'tds_base.dart' as tds;
 import 'tds_reader.dart';
 import 'tds_writer.dart';
@@ -63,6 +64,7 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
       session: this,
       bufsize: bufsize,
     );
+    _rebuildTypeInferrer();
   }
 
   factory AsyncTdsSession.fromContext(AsyncSessionBuildContext context) {
@@ -91,6 +93,7 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
   late RowStrategy _rowStrategy;
   late RowGenerator _rowConvertor;
   late SerializerFactory _typeFactory;
+  late TdsTypeInferrer _typeInferrer;
   Collation? _connectionCollation;
   bool _bytesToUnicode;
   final void Function(Collation?)? _onCollationChanged;
@@ -555,6 +558,16 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
     _state = tds.TDS_PENDING;
   }
 
+  Future<void> submitExecSql(String sql, Map<String, dynamic> params) async {
+    final builder = SpExecutesqlBuilder(typeInferrer: _typeInferrer);
+    final batch = builder.buildBatch(sql, params);
+    if (batch == null) {
+      await submitPlainQuery(sql);
+    } else {
+      await submitPlainQuery(batch);
+    }
+  }
+
   @override
   Future<void> processSimpleRequest() async {
     await beginResponse();
@@ -656,12 +669,14 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
     final hasMore = (status & tds.TDS_DONE_MORE_RESULTS) != 0;
     final wasCancelled = (status & tds.TDS_DONE_CANCELLED) != 0;
     final countValid = (status & tds.TDS_DONE_COUNT) != 0;
-    final rows = tds.isTds72Plus(this)
-        ? await _reader.getInt8()
-        : await _reader.getInt();
-    _doneFlags = status;
-    _rowsAffected = countValid ? rows : tds.TDS_NO_COUNT;
-    _moreRows = hasMore;
+      final rows = tds.isTds72Plus(this) ? await _reader.getInt8() : await _reader.getInt();
+      _doneFlags = status;
+      if (countValid) {
+        _rowsAffected = rows;
+      } else if (_rowsAffected == tds.TDS_NO_COUNT) {
+        _rowsAffected = tds.TDS_NO_COUNT;
+      }
+    _moreRows = false;
     _trace('done', {
       'marker': marker,
       'status': status,
@@ -673,8 +688,8 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
     if ((status & tds.TDS_DONE_ERROR) != 0 && !wasCancelled && !_inCancel) {
       raiseDbException();
     }
-    if (!hasMore && !_inCancel) {
-      _state = tds.TDS_IDLE;
+    if (!_inCancel) {
+      _state = hasMore ? tds.TDS_PENDING : tds.TDS_IDLE;
     }
   }
 
@@ -740,6 +755,7 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
           _collation = Collation.unpack(bytes);
           _connectionCollation = _collation;
           _onCollationChanged?.call(_collation);
+          _rebuildTypeInferrer();
           traceData['new'] = _collation?.toString();
           final extra = payload - Collation.wire_size;
           if (extra > 0) {
@@ -986,6 +1002,72 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
     _skippedToStatus = false;
     _hasStatus = false;
     _returnStatus = null;
+  }
+
+  Future<bool?> nextSet() async {
+    while (_moreRows && await nextRow()) {
+      // Continua drenando o conjunto atual até o DONE chegar.
+    }
+    if (_state == tds.TDS_IDLE) {
+      return false;
+    }
+    if (await findResultOrDone()) {
+      return true;
+    }
+    return null;
+  }
+
+  Future<bool> findResultOrDone() async {
+    _doneFlags = 0;
+    while (true) {
+      final marker = await _nextTokenId();
+      if (marker == tds.TDS7_RESULT_TOKEN) {
+        await _processResultToken();
+        return true;
+      }
+      if (_isDoneToken(marker)) {
+        await _processDone(marker);
+        final hasMore = (_doneFlags & tds.TDS_DONE_MORE_RESULTS) != 0;
+        if (!hasMore) {
+          return false;
+        }
+        continue;
+      }
+      if (await _handleCommonToken(marker)) {
+        continue;
+      }
+      await _skipToken(marker);
+    }
+  }
+
+  Future<bool> nextRow() async {
+    if (_results == null) {
+      throw tds.ProgrammingError(
+        'A operação anterior não retornou resultados.',
+      );
+    }
+    if (!_moreRows) {
+      return false;
+    }
+    while (true) {
+      final marker = await _nextTokenId();
+      if (marker == tds.TDS_ROW_TOKEN) {
+        await _processRowToken();
+        return true;
+      }
+      if (marker == tds.TDS_NBC_ROW_TOKEN) {
+        await _processNbcRowToken();
+        return true;
+      }
+      if (_isDoneToken(marker)) {
+        await _processDone(marker);
+        return false;
+      }
+      if (await _handleCommonToken(marker)) {
+        continue;
+      }
+      await _skipToken(marker);
+    }
   }
 
   Future<dynamic> _readColumnValueAsync(tds.Column column) async {
@@ -1581,11 +1663,21 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
     if (bytesToUnicode != null) {
       _bytesToUnicode = bytesToUnicode;
     }
+    _rebuildTypeInferrer();
   }
 
   @override
   void updateRowStrategy(RowStrategy strategy) {
     _setRowStrategy(strategy);
+  }
+
+  void _rebuildTypeInferrer() {
+    _typeInferrer = TdsTypeInferrer(
+      typeFactory: _typeFactory,
+      collation: _connectionCollation ?? raw_collation,
+      bytesToUnicode: _bytesToUnicode,
+      allowTz: false,
+    );
   }
 
   Future<void> _submitBeginTransaction(int isolationLevel) async {
@@ -1722,6 +1814,12 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
             const <String>[]);
     _rowConvertor = _rowStrategy(names);
     _rowConvertor(const <dynamic>[]);
+  }
+
+  bool _isDoneToken(int marker) {
+    return marker == tds.TDS_DONE_TOKEN ||
+        marker == tds.TDS_DONEPROC_TOKEN ||
+        marker == tds.TDS_DONEINPROC_TOKEN;
   }
 
   Future<int> _nextTokenId() async {

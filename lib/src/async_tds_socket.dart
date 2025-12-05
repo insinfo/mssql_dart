@@ -99,6 +99,16 @@ class AsyncTdsSocket {
   bool get isConnected => _isConnected;
   bool get marsEnabled => _marsEnabled;
 
+  AsyncTdsSession cursor() {
+    final session = _mainSession;
+    if (session is! AsyncTdsSession) {
+      throw tds.InterfaceError(
+        'Cursor assíncrono disponível apenas quando a sessão real é AsyncTdsSession.',
+      );
+    }
+    return session;
+  }
+
   Future<tds.Route?> login() async {
     if (_isConnected) {
       return route;

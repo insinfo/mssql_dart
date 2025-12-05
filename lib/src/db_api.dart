@@ -33,6 +33,13 @@ class DbConnection {
     return cur;
   }
 
+  /// Executa a mesma instrução para cada conjunto de parâmetros fornecido.
+  DbCursor executemany(String sql, Iterable<dynamic> paramSets) {
+    final cur = cursor();
+    cur.executemany(sql, paramSets);
+    return cur;
+  }
+
   /// Encerra a conexão com o servidor.
   void close() {
     if (_closed) {
@@ -68,6 +75,12 @@ class DbCursor {
   }) {
     final cursor = _ensureOpen();
     cursor.execute(sql, params: params, namedParams: namedParams);
+  }
+
+  /// Executa a instrução múltiplas vezes reutilizando o mesmo cursor.
+  void executemany(String sql, Iterable<dynamic> paramSets) {
+    final cursor = _ensureOpen();
+    cursor.executemany(sql, paramSets);
   }
 
   /// Retorna a próxima linha ou `null` se não houver mais resultados.

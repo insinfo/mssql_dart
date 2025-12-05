@@ -750,8 +750,12 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     final countValid = (status & tds.TDS_DONE_COUNT) != 0;
     final rows = tds.isTds72Plus(this) ? _reader.getInt8() : _reader.getInt();
     _doneFlags = status;
-    _rowsAffected = countValid ? rows : tds.TDS_NO_COUNT;
-    _moreRows = hasMore;
+    if (countValid) {
+      _rowsAffected = rows;
+    } else if (_rowsAffected == tds.TDS_NO_COUNT) {
+      _rowsAffected = tds.TDS_NO_COUNT;
+    }
+    _moreRows = false;
     _trace('done', {
       'marker': marker,
       'status': status,
@@ -763,8 +767,8 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     if ((status & tds.TDS_DONE_ERROR) != 0 && !wasCancelled && !_inCancel) {
       raiseDbException();
     }
-    if (!hasMore && !_inCancel) {
-      _state = tds.TDS_IDLE;
+    if (!_inCancel) {
+      _state = hasMore ? tds.TDS_PENDING : tds.TDS_IDLE;
     }
   }
 
@@ -1140,9 +1144,6 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
         final hasMore = (_doneFlags & tds.TDS_DONE_MORE_RESULTS) != 0;
         if (!hasMore) {
           return false;
-        }
-        if ((_doneFlags & tds.TDS_DONE_COUNT) != 0) {
-          return true;
         }
         continue;
       }

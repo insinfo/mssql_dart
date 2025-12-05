@@ -10,6 +10,7 @@ import 'tds_socket.dart';
 import 'async_socket_transport.dart';
 import 'async_tds_socket.dart';
 import 'db_api.dart';
+import 'async_db_api.dart';
 
 /// Estabelece uma conexão síncrona com SQL Server utilizando `TdsSocket`.
 ///
@@ -91,6 +92,40 @@ DbConnection dbConnectSync({
     traceHook: traceHook,
   );
   return dbConnectionFromSocket(socket);
+}
+
+/// Equivalente assíncrono de [dbConnectSync], retornando [AsyncDbConnection].
+Future<AsyncDbConnection> dbConnectAsync({
+  required String host,
+  int port = 1433,
+  required String user,
+  required String password,
+  String database = '',
+  String appName = 'mssql_dart',
+  bool bytesToUnicode = true,
+  Duration timeout = const Duration(seconds: 5),
+  SessionTraceHook? traceHook,
+  bool encrypt = false,
+  String? cafile,
+  SecurityContext? securityContext,
+  bool validateHost = true,
+}) async {
+  final socket = await connectAsync(
+    host: host,
+    port: port,
+    user: user,
+    password: password,
+    database: database,
+    appName: appName,
+    bytesToUnicode: bytesToUnicode,
+    timeout: timeout,
+    traceHook: traceHook,
+    encrypt: encrypt,
+    cafile: cafile,
+    securityContext: securityContext,
+    validateHost: validateHost,
+  );
+  return asyncDbConnectionFromSocket(socket);
 }
 
 tds.TdsLogin _buildLogin({

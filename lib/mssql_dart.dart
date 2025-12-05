@@ -9,4 +9,6 @@ export 'src/async_socket_transport.dart';
 export 'src/connect.dart';
 export 'src/cursor.dart';
 export 'src/db_api.dart';
+export 'src/async_cursor.dart';
+export 'src/async_db_api.dart';
 

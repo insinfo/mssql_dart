@@ -1,42 +1,40 @@
+import 'dart:async';
 import 'dart:collection';
 
 import 'tds_base.dart' as tds;
-import 'tds_session.dart';
+import 'async_tds_session.dart';
 
-/// Cursor síncrono minimalista inspirado no DB-API: aceita apenas instruções
-/// diretas (sem parâmetros ainda) e expõe `execute`/`fetch*`/`nextset`.
-class TdsCursor {
-  TdsCursor(TdsSession session) : _session = session;
+/// Cursor assíncrono inspirado no DB-API. Mantém o controle do estado
+/// atual do `AsyncTdsSession` enquanto executa comandos sequenciais.
+class AsyncTdsCursor {
+  AsyncTdsCursor(this._session);
 
-  final TdsSession _session;
+  final AsyncTdsSession _session;
   bool _hasPendingCommand = false;
   bool _hasCurrentResult = false;
   bool _open = false;
   int? _rowcountOverride;
 
-  /// Última descrição de colunas retornada pelo servidor.
   tds.Results? get description => _session.results;
-
-  /// Número de linhas afetadas pelo último comando (ou -1 quando desconhecido).
   int get rowcount => _rowcountOverride ?? _session.rowsAffected;
+  bool get isIdle => _session.state == tds.TDS_IDLE;
 
-  /// Inicia a execução de um comando SQL simples.
-  void execute(
+  Future<void> execute(
     String sql, {
     List<dynamic>? params,
     Map<String, dynamic>? namedParams,
-  }) {
+  }) async {
     _rowcountOverride = null;
-    _finishActiveRequest();
+    await _finishActiveRequest();
     final bindings = _buildBindings(params, namedParams);
     if (bindings.isEmpty) {
-      _session.submitPlainQuery(sql);
+      await _session.submitPlainQuery(sql);
     } else {
-      _session.submitExecSql(sql, bindings);
+      await _session.submitExecSql(sql, bindings);
     }
-    _session.beginResponse();
+    await _session.beginResponse();
     _hasPendingCommand = true;
-    _session.findResultOrDone();
+    await _session.findResultOrDone();
     _hasCurrentResult = _session.results != null;
     _open = true;
     if (!_hasCurrentResult && _session.state == tds.TDS_IDLE) {
@@ -44,12 +42,11 @@ class TdsCursor {
     }
   }
 
-  /// Executa a mesma instrução múltiplas vezes, aceitando listas ou mapas
-  /// de parâmetros por item. O `rowcount` reflete a soma total sempre que o
-  /// servidor informar o número de linhas afetadas para cada execução.
-  void executemany(String sql, Iterable<dynamic> paramSets) {
+  /// Executa a mesma instrução múltiplas vezes, aceitando listas ou mapas de
+  /// parâmetros para cada item fornecido pelo iterável.
+  Future<void> executemany(String sql, Iterable<dynamic> paramSets) async {
     _rowcountOverride = null;
-    _finishActiveRequest();
+    await _finishActiveRequest();
     var total = 0;
     var canAggregate = true;
     var hadAny = false;
@@ -57,11 +54,11 @@ class TdsCursor {
     for (final params in paramSets) {
       hadAny = true;
       if (params == null) {
-        execute(sql);
+        await execute(sql);
       } else if (params is List<dynamic>) {
-        execute(sql, params: params);
+        await execute(sql, params: params);
       } else if (params is Map<String, dynamic>) {
-        execute(sql, namedParams: params);
+        await execute(sql, namedParams: params);
       } else {
         throw tds.InterfaceError(
           'executemany aceita apenas listas ou mapas de parâmetros',
@@ -89,8 +86,7 @@ class TdsCursor {
     }
   }
 
-  /// Retorna a próxima linha do conjunto atual, ou `null` se não houver mais.
-  dynamic fetchone() {
+  Future<dynamic> fetchone() async {
     if (!_hasPendingCommand) {
       throw tds.InterfaceError('execute() precisa ser chamado antes de fetchone().');
     }
@@ -104,7 +100,7 @@ class TdsCursor {
     if (buffered != null) {
       return buffered;
     }
-    if (_session.nextRow()) {
+    if (await _session.nextRow()) {
       return _session.takeRow();
     }
     _hasCurrentResult = false;
@@ -114,8 +110,7 @@ class TdsCursor {
     return null;
   }
 
-  /// Lê todas as linhas do conjunto atual.
-  List<dynamic> fetchall() {
+  Future<List<dynamic>> fetchall() async {
     if (!_hasPendingCommand) {
       throw tds.InterfaceError('execute() precisa ser chamado antes de fetchall().');
     }
@@ -131,7 +126,7 @@ class TdsCursor {
       rows.add(row);
       row = _session.takeRow();
     }
-    while (_session.nextRow()) {
+    while (await _session.nextRow()) {
       final materialized = _session.takeRow();
       if (materialized != null) {
         rows.add(materialized);
@@ -141,12 +136,11 @@ class TdsCursor {
     return rows;
   }
 
-  /// Avança para o próximo result set, retornando `true` se existir outro.
-  bool nextset() {
+  Future<bool> nextset() async {
     if (!_hasPendingCommand) {
       throw tds.InterfaceError('execute() precisa ser chamado antes de nextset().');
     }
-    final next = _session.nextSet();
+    final next = await _session.nextSet();
     if (next == true) {
       _session.clearRowBuffer();
       _hasCurrentResult = true;
@@ -160,7 +154,7 @@ class TdsCursor {
     return false;
   }
 
-  void _finishActiveRequest() {
+  Future<void> _finishActiveRequest() async {
     if (!_open) {
       _session.clearRowBuffer();
       _hasCurrentResult = false;
@@ -168,11 +162,11 @@ class TdsCursor {
       return;
     }
     if (_hasCurrentResult) {
-      _drainCurrentSet();
+      await _drainCurrentSet();
       _hasCurrentResult = false;
     }
-    while (_session.nextSet() == true) {
-      _drainCurrentSet();
+    while (await _session.nextSet() == true) {
+      await _drainCurrentSet();
     }
     _open = false;
     _hasCurrentResult = false;
@@ -180,12 +174,12 @@ class TdsCursor {
     _session.clearRowBuffer();
   }
 
-  void _drainCurrentSet() {
+  Future<void> _drainCurrentSet() async {
     var row = _session.takeRow();
     while (row != null) {
       row = _session.takeRow();
     }
-    while (_session.nextRow()) {
+    while (await _session.nextRow()) {
       _session.takeRow();
     }
   }

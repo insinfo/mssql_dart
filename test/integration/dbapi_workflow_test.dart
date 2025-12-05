@@ -84,5 +84,48 @@ void main() {
       ]));
       expect(cursor.nextset(), isFalse);
     });
+
+    test('cursor executemany soma rowcount', () {
+      final seed = Random().nextInt(1 << 16);
+      final tableName = '#dbapi_many_${seed.toRadixString(16)}';
+
+      final cursor = conn.cursor();
+      cursor.execute('CREATE TABLE $tableName (id INT PRIMARY KEY, nome NVARCHAR(40));');
+      cursor.fetchall();
+
+      addTearDown(() {
+        try {
+          cursor.execute("IF OBJECT_ID('tempdb..$tableName') IS NOT NULL DROP TABLE $tableName");
+          cursor.fetchall();
+        } catch (_) {}
+      });
+
+      cursor.executemany(
+        'INSERT INTO $tableName (id, nome) VALUES (@p0, @p1)',
+        [
+          [0, 'Nome 0'],
+          [1, 'Nome 1'],
+        ],
+      );
+      cursor.fetchall();
+      expect(cursor.rowcount, equals(2));
+
+      cursor.executemany(
+        'UPDATE $tableName SET nome = @nome WHERE id = @id',
+        [
+          {'id': 0, 'nome': 'Atualizado 0'},
+          {'@id': 1, '@nome': 'Atualizado 1'},
+        ],
+      );
+      cursor.fetchall();
+      expect(cursor.rowcount, equals(2));
+
+      cursor.execute('SELECT id, nome FROM $tableName ORDER BY id');
+      final rows = cursor.fetchall().cast<List<dynamic>>();
+      expect(rows, equals([
+        [0, 'Atualizado 0'],
+        [1, 'Atualizado 1'],
+      ]));
+    });
   });
 }
