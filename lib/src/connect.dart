@@ -25,7 +25,13 @@ TdsSocket connectSync({
   bool bytesToUnicode = true,
   Duration timeout = const Duration(seconds: 5),
   SessionTraceHook? traceHook,
+  bool encrypt = false,
 }) {
+  if (encrypt) {
+    throw tds.NotSupportedError(
+      'connectSync ainda não suporta TLS. Utilize connectAsync para conexões criptografadas.',
+    );
+  }
   final transport = SocketTransport.connectSync(
     host,
     port,
@@ -41,6 +47,7 @@ TdsSocket connectSync({
       database: database,
       appName: appName,
       bytesToUnicode: bytesToUnicode,
+      encrypt: false,
     );
     final socket = TdsSocket(
       transport: transport,
@@ -67,11 +74,11 @@ tds.TdsLogin _buildLogin({
   required String database,
   required String appName,
   required bool bytesToUnicode,
+  required bool encrypt,
   bool allowTls = false,
   String? cafile,
   SecurityContext? securityContext,
   bool validateHost = true,
-  bool encLoginOnly = false,
 }) {
   final login = tds.TdsLogin()
     ..serverName = host
@@ -91,26 +98,38 @@ tds.TdsLogin _buildLogin({
     ..clientId = _generateClientId()
     ..useMars = false;
 
-  final wantsTls = cafile != null || securityContext != null;
-  if (!allowTls && wantsTls) {
+  if (!allowTls && encrypt) {
     throw ArgumentError(
       'TLS não está disponível para este modo de conexão. Utilize connectAsync para criptografia.',
     );
   }
-  if (encLoginOnly && !wantsTls) {
+  if (!encrypt && (cafile != null || securityContext != null)) {
     throw ArgumentError(
-      'encLoginOnly exige um cafile ou SecurityContext configurado.',
+      'Parâmetros TLS foram fornecidos, mas encrypt=false. Ajuste encrypt ou remova cafile/securityContext.',
     );
   }
-  if (wantsTls) {
+  if (encrypt) {
+    SecurityContext? ctx = securityContext;
+    if (ctx == null && cafile != null && cafile.isNotEmpty) {
+      ctx = SecurityContext();
+      try {
+        ctx.setTrustedCertificates(cafile);
+      } on TlsException catch (error) {
+        throw tds.OperationalError(
+          'Falha ao carregar certificado de confiança ($cafile): ${error.message}',
+        );
+      } on IOException catch (error) {
+        throw tds.OperationalError(
+          'Não foi possível ler o arquivo de certificados ($cafile): $error',
+        );
+      }
+    }
     login
       ..cafile = cafile
-      ..tlsCtx = securityContext
+      ..tlsCtx = ctx
       ..validateHost = validateHost
-      ..encLoginOnly = encLoginOnly
-      ..encFlag = encLoginOnly
-          ? tds.PreLoginEnc.ENCRYPT_OFF
-          : tds.PreLoginEnc.ENCRYPT_ON;
+      ..encLoginOnly = false
+      ..encFlag = tds.PreLoginEnc.ENCRYPT_REQ;
   } else {
     login
       ..cafile = null
@@ -131,10 +150,10 @@ tds.TdsLogin buildLoginForTesting({
   String database = '',
   String appName = 'mssql_dart',
   bool bytesToUnicode = true,
+  bool encrypt = false,
   String? cafile,
   SecurityContext? securityContext,
   bool validateHost = true,
-  bool encLoginOnly = false,
 }) {
   return _buildLogin(
     host: host,
@@ -145,10 +164,10 @@ tds.TdsLogin buildLoginForTesting({
     appName: appName,
     bytesToUnicode: bytesToUnicode,
     allowTls: true,
+    encrypt: encrypt,
     cafile: cafile,
     securityContext: securityContext,
     validateHost: validateHost,
-    encLoginOnly: encLoginOnly,
   );
 }
 
@@ -162,17 +181,12 @@ Future<AsyncTdsSocket> connectAsync({
   bool bytesToUnicode = true,
   Duration timeout = const Duration(seconds: 5),
   SessionTraceHook? traceHook,
+  bool encrypt = false,
   String? cafile,
   SecurityContext? securityContext,
   bool validateHost = true,
-  bool loginEncryptionOnly = false,
 }) async {
-  final transport = await AsyncSocketTransport.connect(
-    host,
-    port,
-    timeout: timeout,
-    description: '$host:$port',
-  );
+  tds.AsyncTransportProtocol? transport;
   try {
     final login = _buildLogin(
       host: host,
@@ -183,11 +197,26 @@ Future<AsyncTdsSocket> connectAsync({
       appName: appName,
       bytesToUnicode: bytesToUnicode,
       allowTls: true,
+      encrypt: encrypt,
       cafile: cafile,
       securityContext: securityContext,
       validateHost: validateHost,
-      encLoginOnly: loginEncryptionOnly,
     );
+    transport = encrypt
+        ? await AsyncSocketTransport.connectSecure(
+            host,
+            port,
+            timeout: timeout,
+            description: '$host:$port',
+            context: login.tlsCtx as SecurityContext?,
+            validateHost: login.validateHost,
+          )
+        : await AsyncSocketTransport.connect(
+            host,
+            port,
+            timeout: timeout,
+            description: '$host:$port',
+          );
     final socket = AsyncTdsSocket(
       transport: transport,
       login: login,
@@ -200,7 +229,9 @@ Future<AsyncTdsSocket> connectAsync({
     await socket.login();
     return socket;
   } catch (error) {
-    await transport.close();
+    if (transport != null) {
+      await transport.close();
+    }
     rethrow;
   }
 }

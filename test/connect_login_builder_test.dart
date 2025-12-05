@@ -17,43 +17,43 @@ void main() {
       expect(login.tlsCtx, isNull);
     });
 
-    test('enables TLS when cafile is provided', () {
+    test('enables TLS-first when encrypt=true', () {
       final login = buildLoginForTesting(
         host: 'host',
         user: 'user',
         password: 'pass',
-        cafile: 'certs/root.pem',
+        encrypt: true,
         validateHost: false,
       );
 
-      expect(login.encFlag, tds.PreLoginEnc.ENCRYPT_ON);
+      expect(login.encFlag, tds.PreLoginEnc.ENCRYPT_REQ);
       expect(login.encLoginOnly, isFalse);
-      expect(login.cafile, equals('certs/root.pem'));
       expect(login.validateHost, isFalse);
     });
 
-    test('supports login-only encryption semantics', () {
-      final login = buildLoginForTesting(
-        host: 'host',
-        user: 'user',
-        password: 'pass',
-        cafile: 'certs/root.pem',
-        encLoginOnly: true,
-      );
-
-      expect(login.encFlag, tds.PreLoginEnc.ENCRYPT_OFF);
-      expect(login.encLoginOnly, isTrue);
-    });
-
-    test('throws when login-only encryption is requested without TLS data', () {
+    test('requires encrypt=true when TLS params are provided', () {
       expect(
         () => buildLoginForTesting(
           host: 'host',
           user: 'user',
           password: 'pass',
-          encLoginOnly: true,
+          cafile: 'certs/root.pem',
         ),
         throwsArgumentError,
+      );
+    });
+  });
+
+  group('connectSync TLS guard', () {
+    test('rejects encrypt=true until sync TLS is implemented', () {
+      expect(
+        () => connectSync(
+          host: 'localhost',
+          user: 'user',
+          password: 'pass',
+          encrypt: true,
+        ),
+        throwsA(isA<tds.NotSupportedError>()),
       );
     });
   });

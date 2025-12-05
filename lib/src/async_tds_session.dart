@@ -1,10 +1,10 @@
 import 'dart:collection';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-import 'async_socket_transport.dart';
+import 'package:meta/meta.dart';
+
 import 'collate.dart';
 import 'row_strategies.dart';
 import 'session_link.dart';
@@ -12,6 +12,7 @@ import 'tds_base.dart' as tds;
 import 'tds_reader.dart';
 import 'tds_writer.dart';
 import 'tds_types.dart';
+import 'transport_tls.dart';
 
 const int _clientLibraryVersion = 0x01000000;
 const String _defaultInstanceName = 'MSSQLServer';
@@ -252,108 +253,56 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
     });
   }
 
+  @visibleForTesting
+  Future<void> debugHandleEncryptionNegotiation(
+    tds.TdsLogin login,
+    int cryptFlag,
+  ) {
+    return _handleEncryptionNegotiation(login, cryptFlag);
+  }
+
   Future<void> _handleEncryptionNegotiation(
     tds.TdsLogin login,
     int cryptFlag,
   ) async {
-    final supportsTls = login.encFlag != tds.PreLoginEnc.ENCRYPT_NOT_SUP;
+    final transport = _transport;
+    final tlsTransport = transport is AsyncTlsTransport
+      ? transport as AsyncTlsTransport
+      : null;
+    final alreadySecure = tlsTransport?.isSecure ?? false;
+    if (alreadySecure) {
+      _trace('tls.already_secure', {
+        'crypt_flag': cryptFlag,
+        'client_flag': login.encFlag,
+      });
+      return;
+    }
+
+    final clientRequiresTls = login.encFlag == tds.PreLoginEnc.ENCRYPT_REQ;
+
     switch (cryptFlag) {
       case tds.PreLoginEnc.ENCRYPT_OFF:
-        if (login.encFlag == tds.PreLoginEnc.ENCRYPT_ON) {
-          _badStream(
-            'Servidor sinalizou ENCRYPT_OFF ao mesmo tempo em que o cliente exige criptografia.',
-          );
-        }
-        if (!supportsTls) {
-          return;
-        }
-        await _establishSecureChannel(login, loginOnly: true);
-        break;
-      case tds.PreLoginEnc.ENCRYPT_ON:
-        if (!supportsTls) {
+        if (clientRequiresTls) {
           throw tds.OperationalError(
-            'O servidor exige criptografia TLS, mas o login atual não habilitou suporte (defina um cafile/tlsCtx e ajuste encFlag).',
+            'A conexão atual foi aberta sem TLS-first, mas o cliente exige criptografia. Refaça connectAsync com encrypt=true.',
           );
         }
-        await _establishSecureChannel(login);
-        break;
-      case tds.PreLoginEnc.ENCRYPT_REQ:
-        if (!supportsTls) {
-          throw tds.OperationalError(
-            'O servidor exige criptografia TLS, mas o login atual não habilitou suporte (defina um cafile/tlsCtx e ajuste encFlag).',
-          );
-        }
-        await _establishSecureChannel(login);
-        break;
+        return;
       case tds.PreLoginEnc.ENCRYPT_NOT_SUP:
-        if (login.encFlag == tds.PreLoginEnc.ENCRYPT_ON) {
+        if (clientRequiresTls) {
           throw tds.OperationalError(
-            'O servidor não suporta criptografia, mas o cliente a tornou obrigatória.',
+            'O servidor não suporta criptografia para este login. Ajuste encrypt=false se quiser seguir em modo plaintext.',
           );
         }
-        break;
+        return;
+      case tds.PreLoginEnc.ENCRYPT_ON:
+      case tds.PreLoginEnc.ENCRYPT_REQ:
+        throw tds.OperationalError(
+          'O servidor exige criptografia TLS, mas esta conexão foi aberta em modo plaintext. Refaça connectAsync com encrypt=true.',
+        );
       default:
         _badStream('Valor inesperado de encrypt_flag retornado pelo servidor: $cryptFlag');
     }
-  }
-
-  Future<void> _establishSecureChannel(
-    tds.TdsLogin login, {
-    bool loginOnly = false,
-  }) async {
-    final transport = _transport;
-    if (transport is! AsyncSocketTransport) {
-      throw tds.NotSupportedError(
-        'TLS só está disponível para AsyncSocketTransport por enquanto.',
-      );
-    }
-    final context = _resolveSecurityContext(login);
-    if (context == null) {
-      throw tds.NotSupportedError(
-        'TLS solicitado mas nenhum SecurityContext foi configurado (defina login.cafile ou login.tlsCtx).',
-      );
-    }
-    final allowBadCertificate = login.validateHost
-        ? null
-        : (X509Certificate certificate) => true;
-    final sniHost =
-        login.serverName.isNotEmpty ? login.serverName : (transport.host ?? '');
-    await transport.upgradeToSecureSocket(
-      context: context,
-      onBadCertificate: allowBadCertificate,
-      host: sniHost.isEmpty ? null : sniHost,
-    );
-    _trace('tls.established', {
-      'host': sniHost,
-      'login_only': loginOnly,
-      'cafile': login.cafile,
-      'validate_host': login.validateHost,
-    });
-  }
-
-  SecurityContext? _resolveSecurityContext(tds.TdsLogin login) {
-    final cached = login.tlsCtx;
-    if (cached is SecurityContext) {
-      return cached;
-    }
-    final cafile = login.cafile;
-    if (cafile == null || cafile.isEmpty) {
-      return null;
-    }
-    final context = SecurityContext();
-    try {
-      context.setTrustedCertificates(cafile);
-    } on TlsException catch (error) {
-      throw tds.OperationalError(
-        'Falha ao carregar certificado de confiança ($cafile): ${error.message}',
-      );
-    } on IOException catch (error) {
-      throw tds.OperationalError(
-        'Não foi possível ler o arquivo de certificados ($cafile): $error',
-      );
-    }
-    login.tlsCtx = context;
-    return context;
   }
 
   @override
@@ -592,6 +541,11 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
   Future<void> processSimpleRequest() async {
     await beginResponse();
     await _drainUntilDone();
+  }
+
+  @override
+  Future<void> cancel() {
+    return _sendCancel();
   }
 
   Future<void> _drainUntilDone() async {

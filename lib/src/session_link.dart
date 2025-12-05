@@ -96,6 +96,7 @@ abstract class SessionLink extends tds.TdsSessionContract {
   void raiseDbException();
   void submitPlainQuery(String sql);
   void processSimpleRequest();
+  void cancel();
   bool get hasBufferedRows;
   int get bufferedRowCount;
   dynamic takeRow();
@@ -126,6 +127,7 @@ abstract class AsyncSessionLink extends tds.TdsSessionContract {
   void raiseDbException();
   Future<void> submitPlainQuery(String sql);
   Future<void> processSimpleRequest();
+  Future<void> cancel();
   bool get hasBufferedRows;
   int get bufferedRowCount;
   dynamic takeRow();

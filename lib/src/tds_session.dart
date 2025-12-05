@@ -534,6 +534,11 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     _drainUntilDone();
   }
 
+  @override
+  void cancel() {
+    _sendCancel();
+  }
+
   void _drainUntilDone() {
     while (true) {
       final marker = _nextTokenId();

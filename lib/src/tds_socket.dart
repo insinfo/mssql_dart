@@ -286,6 +286,10 @@ class TdsSocket {
     _mainSession.authentication = null;
   }
 
+  void cancel() {
+    _mainSession.cancel();
+  }
+
   void closeAllMarsSessions() {
     if (_marsManager != null) {
       // TODO: implementar quando o SmpManager for portado

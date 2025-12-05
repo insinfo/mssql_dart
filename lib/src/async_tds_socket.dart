@@ -137,6 +137,10 @@ class AsyncTdsSocket {
     _mainSession.authentication = null;
   }
 
+  Future<void> cancel() {
+    return _mainSession.cancel();
+  }
+
   void closeAllMarsSessions() {
     if (_marsManager != null) {
       throw UnimplementedError('SmpManager ainda não foi portado');

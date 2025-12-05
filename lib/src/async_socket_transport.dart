@@ -4,15 +4,18 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'tds_base.dart' as tds;
+import 'transport_tls.dart';
 
-class AsyncSocketTransport implements tds.AsyncTransportProtocol {
+class AsyncSocketTransport implements tds.AsyncTransportProtocol, AsyncTlsTransport {
   AsyncSocketTransport._(
     this._socket, {
     required this.description,
     String? host,
     int? port,
+    bool isSecure = false,
   })  : _host = host,
-        _port = port {
+        _port = port,
+        _secure = isSecure {
     _subscription = _socket.listen(
       _handleData,
       onDone: _handleDone,
@@ -35,6 +38,37 @@ class AsyncSocketTransport implements tds.AsyncTransportProtocol {
         host: host,
         port: port,
       );
+    } on SocketException catch (err) {
+      throw tds.OperationalError('Falha ao conectar a $host:$port: ${err.message}');
+    }
+  }
+
+  static Future<AsyncSocketTransport> connectSecure(
+    String host,
+    int port, {
+    Duration? timeout,
+    String? description,
+    SecurityContext? context,
+    bool validateHost = true,
+  }) async {
+    try {
+      final socket = await SecureSocket.connect(
+        host,
+        port,
+        timeout: timeout,
+        context: context,
+        supportedProtocols: const ['tls1.3', 'tls1.2'],
+        onBadCertificate: validateHost ? null : (_) => true,
+      );
+      return AsyncSocketTransport._(
+        socket,
+        description: description ?? '$host:$port',
+        host: host,
+        port: port,
+        isSecure: true,
+      );
+    } on HandshakeException catch (err) {
+      throw tds.OperationalError('Falha no handshake TLS: ${err.message}');
     } on SocketException catch (err) {
       throw tds.OperationalError('Falha ao conectar a $host:$port: ${err.message}');
     }
@@ -66,6 +100,8 @@ class AsyncSocketTransport implements tds.AsyncTransportProtocol {
   }
 
   bool get isSecure => _secure;
+  @override
+  String? get remoteHost => _host;
   String? get host => _host;
   int? get port => _port;
 
@@ -181,10 +217,12 @@ class AsyncSocketTransport implements tds.AsyncTransportProtocol {
     _pendingRead = null;
   }
 
+  @override
   Future<void> upgradeToSecureSocket({
-    SecurityContext? context,
+    required SecurityContext context,
     bool Function(X509Certificate certificate)? onBadCertificate,
     String? host,
+    bool loginOnly = false,
   }) async {
     if (_secure) {
       return;
