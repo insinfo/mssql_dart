@@ -36,4 +36,32 @@ void main() {
     expect(socket.env.database?.toLowerCase(), equals(database));
     expect(traces.any((entry) => entry.startsWith('login.ack')), isTrue);
   });
+
+  test('takeRow/takeAllRows expõem resultados após processSimpleRequest', () {
+    final socket = connectSync(
+      host: host,
+      port: port,
+      user: user,
+      password: password,
+      database: database,
+      bytesToUnicode: true,
+    );
+    addTearDown(() => socket.close());
+
+    socket.mainSession.submitPlainQuery('SELECT 1 AS valor UNION ALL SELECT 2');
+    socket.mainSession.processSimpleRequest();
+
+    expect(socket.hasBufferedRows, isTrue);
+    expect(socket.bufferedRowCount, equals(2));
+
+    final firstRow = socket.takeRow() as List<dynamic>?;
+    expect(firstRow, isNotNull);
+    expect(firstRow, equals([1]));
+
+    final remaining = socket.takeAllRows();
+    expect(remaining, hasLength(1));
+    expect(remaining.first, equals([2]));
+    expect(socket.hasBufferedRows, isFalse);
+    expect(socket.bufferedRowCount, isZero);
+  });
 }

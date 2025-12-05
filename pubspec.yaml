@@ -1,5 +1,5 @@
 name: mssql_dart
-description: High Performance Microsoft SQL Server Driver for Dart (32 & 64bits)
+description: High Performance Microsoft SQL Server Driver for Dart 
 version: 1.0.1
 homepage: 
 repository: https://github.com/insinfo/mssql_dart
@@ -11,6 +11,7 @@ dependencies:
   galileo_utf: ^3.0.0
   pointycastle: ^4.0.0
   tuple: ^2.0.2
+  meta: ^1.12.0
 
 dev_dependencies:
   test: any

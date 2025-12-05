@@ -96,6 +96,11 @@ abstract class SessionLink extends tds.TdsSessionContract {
   void raiseDbException();
   void submitPlainQuery(String sql);
   void processSimpleRequest();
+  bool get hasBufferedRows;
+  int get bufferedRowCount;
+  dynamic takeRow();
+  List<dynamic> takeAllRows();
+  void clearRowBuffer();
   void updateTypeSystem(
     SerializerFactory factory, {
     Collation? collation,
@@ -121,6 +126,11 @@ abstract class AsyncSessionLink extends tds.TdsSessionContract {
   void raiseDbException();
   Future<void> submitPlainQuery(String sql);
   Future<void> processSimpleRequest();
+  bool get hasBufferedRows;
+  int get bufferedRowCount;
+  dynamic takeRow();
+  List<dynamic> takeAllRows();
+  void clearRowBuffer();
   void updateTypeSystem(
     SerializerFactory factory, {
     Collation? collation,

@@ -1,3 +1,4 @@
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -90,6 +91,9 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
   final void Function(tds.Route)? _onRouteChange;
   final void Function(String)? _onUnicodeSortFlags;
   final SessionTraceHook? _traceHook;
+  static final DateTime _baseDate1900 = DateTime.utc(1900, 1, 1);
+  static final DateTime _baseDate0001 = DateTime.utc(1, 1, 1);
+  final Queue<dynamic> _rowBuffer = ListQueue<dynamic>();
 
   final List<tds.Message> _messages = [];
   tds.AuthProtocol? _authentication;
@@ -118,6 +122,41 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     hook(event, Map.unmodifiable(data));
   }
 
+  void _enforceSyncEncryptionPolicy(tds.TdsLogin login, int cryptFlag) {
+    switch (cryptFlag) {
+      case tds.PreLoginEnc.ENCRYPT_OFF:
+        if (login.encFlag == tds.PreLoginEnc.ENCRYPT_ON) {
+          _badStream('Servidor não aceitou criptografia obrigatória');
+        }
+        if (login.encFlag == tds.PreLoginEnc.ENCRYPT_OFF ||
+            login.encFlag == tds.PreLoginEnc.ENCRYPT_REQ) {
+          _failSyncTls(
+            'O cliente solicitou criptografia apenas para o LOGIN, recurso indisponível no modo síncrono.',
+          );
+        }
+        return;
+      case tds.PreLoginEnc.ENCRYPT_ON:
+      case tds.PreLoginEnc.ENCRYPT_REQ:
+        _failSyncTls(
+          'O servidor exige criptografia TLS (crypt_flag=$cryptFlag).',
+        );
+      case tds.PreLoginEnc.ENCRYPT_NOT_SUP:
+        if (login.encFlag != tds.PreLoginEnc.ENCRYPT_NOT_SUP) {
+          _failSyncTls(
+            'Foi solicitada criptografia pelo cliente, porém o servidor não suporta.',
+          );
+        }
+        return;
+    }
+  }
+
+  Never _failSyncTls(String reason) {
+    close();
+    throw tds.NotSupportedError(
+      '$reason Conexões síncronas ainda não suportam TLS; utilize connectAsync() para habilitar criptografia.',
+    );
+  }
+
   SerializerFactory get typeFactory => _typeFactory;
   Collation? get connectionCollation => _connectionCollation;
   bool get bytesToUnicode => _bytesToUnicode;
@@ -131,6 +170,8 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
   tds.Results? get results => _results;
   List<dynamic> get currentRow => _currentRow;
   bool get skippedToStatus => _skippedToStatus;
+  bool get hasBufferedRows => _rowBuffer.isNotEmpty;
+  int get bufferedRowCount => _rowBuffer.length;
 
   String? get lastQuery => _lastQuery;
 
@@ -248,16 +289,7 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
       offset += 5;
     }
     login.serverEncFlag = cryptFlag;
-    if (cryptFlag == tds.PreLoginEnc.ENCRYPT_ON ||
-        cryptFlag == tds.PreLoginEnc.ENCRYPT_REQ) {
-      throw tds.NotSupportedError(
-        'Negociação TLS ainda não foi portada (crypt=$cryptFlag).',
-      );
-    }
-    if (cryptFlag == tds.PreLoginEnc.ENCRYPT_OFF &&
-        login.encFlag == tds.PreLoginEnc.ENCRYPT_ON) {
-      _badStream('Servidor não aceitou criptografia obrigatória');
-    }
+    _enforceSyncEncryptionPolicy(login, cryptFlag);
     _trace('prelogin.response', {
       'crypt_flag': cryptFlag,
       'mars_requested': login.useMars,
@@ -479,6 +511,7 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
         'Já existe uma operação pendente na sessão atual.',
       );
     }
+    _rowBuffer.clear();
     _messages.clear();
     _rowsAffected = tds.TDS_NO_COUNT;
     _lastQuery = sql;
@@ -830,6 +863,7 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
       _currentRow[i] = _readColumnValueSync(safeInfo.columns[i]);
     }
     _trace('row', {'values': List<dynamic>.from(_currentRow)});
+    _bufferRowSnapshot();
   }
 
   void _processNbcRowToken() {
@@ -849,7 +883,29 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
       }
     }
     _trace('nbcrow', {'values': List<dynamic>.from(_currentRow)});
+    _bufferRowSnapshot();
   }
+
+  /// Remove e devolve a próxima linha já materializada pelo [RowStrategy].
+  dynamic takeRow() {
+    if (_rowBuffer.isEmpty) {
+      return null;
+    }
+    return _rowBuffer.removeFirst();
+  }
+
+  /// Devolve todas as linhas pendentes e limpa o buffer.
+  List<dynamic> takeAllRows() {
+    if (_rowBuffer.isEmpty) {
+      return const <dynamic>[];
+    }
+    final rows = List<dynamic>.from(_rowBuffer, growable: false);
+    _rowBuffer.clear();
+    return rows;
+  }
+
+  /// Descarrega as linhas já lidas sem retorná-las.
+  void clearRowBuffer() => _rowBuffer.clear();
 
   dynamic _readColumnValueSync(tds.Column column) {
     final typeInfo = column.serializer;
@@ -869,6 +925,37 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
         return _reader.getInt8();
       case tds.INTNTYPE:
         return _readIntnValueSync();
+      case tds.FLT4TYPE:
+        return _readFloat32ValueSync();
+      case tds.FLT8TYPE:
+        return _readFloat64ValueSync();
+      case tds.FLTNTYPE:
+        return _readFloatnValueSync();
+      case tds.MONEYTYPE:
+        return _readMoneyValueSync(8);
+      case tds.MONEY4TYPE:
+        return _readMoneyValueSync(4);
+      case tds.MONEYNTYPE:
+        return _readMoneynValueSync();
+      case tds.DATETIMETYPE:
+        return _readDateTimeValueSync();
+      case tds.DATETIM4TYPE:
+        return _readSmallDateTimeValueSync();
+      case tds.DATETIMNTYPE:
+        return _readDateTimenValueSync();
+      case tds.DATENTYPE:
+        return _readDateValueSync();
+      case tds.TIMENTYPE:
+        return _readTimeValueSync(typeInfo);
+      case tds.DATETIME2NTYPE:
+        return _readDateTime2ValueSync(typeInfo);
+      case tds.DATETIMEOFFSETNTYPE:
+        return _readDateTimeOffsetValueSync(typeInfo);
+      case tds.DECIMALNTYPE:
+      case tds.NUMERICNTYPE:
+        return _readDecimalValueSync(typeInfo);
+      case tds.GUIDTYPE:
+        return _readGuidValueSync();
       case tds.BIGVARCHRTYPE:
       case tds.BIGCHARTYPE:
         return _readAnsiValueSync(lengthBytes: 2);
@@ -886,6 +973,12 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
       case tds.SYBVARBINARY:
       case tds.BINARYTYPE:
         return _readBinaryValueSync(lengthBytes: 1);
+      case tds.TEXTTYPE:
+        return _readTextValueSync(typeInfo, unicode: false);
+      case tds.NTEXTTYPE:
+        return _readTextValueSync(typeInfo, unicode: true);
+      case tds.XMLTYPE:
+        return _readXmlValueSync();
       default:
         throw tds.NotSupportedError(
           'Leitura de valores para o tipo ${typeInfo.typeId} ainda não foi portada',
@@ -946,6 +1039,276 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     }
     final data = _reader.readBytes(byteLength);
     return _bytesToUnicode ? ucs2Codec.decode(data) : data;
+  }
+
+  void _bufferRowSnapshot() {
+    final hasResults = _results != null && _currentRow.isNotEmpty;
+    if (!hasResults) {
+      return;
+    }
+    final snapshot = List<dynamic>.from(_currentRow, growable: false);
+    final materialized = _rowConvertor(snapshot);
+    _rowBuffer.add(materialized);
+  }
+
+  double _readFloat32ValueSync() {
+    final bytes = _reader.readBytes(4);
+    return ByteData.sublistView(bytes).getFloat32(0, Endian.little);
+  }
+
+  double _readFloat64ValueSync() {
+    final bytes = _reader.readBytes(8);
+    return ByteData.sublistView(bytes).getFloat64(0, Endian.little);
+  }
+
+  double? _readFloatnValueSync() {
+    final length = _reader.getByte();
+    if (length == 0) {
+      return null;
+    }
+    switch (length) {
+      case 4:
+        return _readFloat32ValueSync();
+      case 8:
+        return _readFloat64ValueSync();
+      default:
+        throw tds.InterfaceError('Comprimento inválido para FLOATN: $length');
+    }
+  }
+
+  double _readMoneyValueSync(int length) {
+    if (length == 4) {
+      return _reader.getInt() / 10000.0;
+    }
+    if (length == 8) {
+      return _reader.getInt8() / 10000.0;
+    }
+    throw tds.InterfaceError('Comprimento inválido para MONEY: $length');
+  }
+
+  double? _readMoneynValueSync() {
+    final length = _reader.getByte();
+    if (length == 0) {
+      return null;
+    }
+    return _readMoneyValueSync(length);
+  }
+
+  DateTime _readDateTimeValueSync() {
+    final days = _reader.getInt();
+    final ticks = _reader.getUInt();
+    final base = _baseDate1900.add(Duration(days: days));
+    final micros = (ticks * 1000000) ~/ 300;
+    return base.add(Duration(microseconds: micros));
+  }
+
+  DateTime _readSmallDateTimeValueSync() {
+    final days = _reader.getUSmallInt();
+    final minutes = _reader.getUSmallInt();
+    return _baseDate1900.add(
+      Duration(days: days, minutes: minutes),
+    );
+  }
+
+  DateTime? _readDateTimenValueSync() {
+    final length = _reader.getByte();
+    if (length == 0) {
+      return null;
+    }
+    if (length == 4) {
+      return _readSmallDateTimeValueSync();
+    }
+    if (length == 8) {
+      return _readDateTimeValueSync();
+    }
+    throw tds.InterfaceError('Comprimento inválido para DATETIMN: $length');
+  }
+
+  DateTime? _readDateValueSync() {
+    final length = _reader.getByte();
+    if (length == 0) {
+      return null;
+    }
+    if (length != 3) {
+      throw tds.InterfaceError('Comprimento inválido para DATE: $length');
+    }
+    final days = _decodeLittleEndianInt(_reader.readBytes(3));
+    return _baseDate0001.add(Duration(days: days));
+  }
+
+  Duration? _readTimeValueSync(_TypeInfo typeInfo) {
+    final length = _reader.getByte();
+    if (length == 0) {
+      return null;
+    }
+    final precision = typeInfo.precision ?? 7;
+    return _readTimeDurationFromBytes(length, precision);
+  }
+
+  DateTime? _readDateTime2ValueSync(_TypeInfo typeInfo) {
+    final size = _reader.getByte();
+    if (size == 0) {
+      return null;
+    }
+    if (size < 3) {
+      throw tds.InterfaceError('Comprimento inválido para DATETIME2: $size');
+    }
+    final precision = typeInfo.precision ?? 7;
+    final timeSize = size - 3;
+    final time = _readTimeDurationFromBytes(timeSize, precision);
+    final days = _decodeLittleEndianInt(_reader.readBytes(3));
+    return _baseDate0001.add(Duration(days: days)).add(time);
+  }
+
+  DateTimeOffsetValue? _readDateTimeOffsetValueSync(_TypeInfo typeInfo) {
+    final size = _reader.getByte();
+    if (size == 0) {
+      return null;
+    }
+    if (size < 5) {
+      throw tds.InterfaceError(
+        'Comprimento inválido para DATETIMEOFFSET: $size',
+      );
+    }
+    final precision = typeInfo.precision ?? 7;
+    final timeSize = size - 5;
+    final time = _readTimeDurationFromBytes(timeSize, precision);
+    final days = _decodeLittleEndianInt(_reader.readBytes(3));
+    final offsetMinutes = _reader.getSmallInt();
+    final utcDate = _baseDate0001.add(Duration(days: days)).add(time);
+    final utcValue = DateTime.fromMicrosecondsSinceEpoch(
+      utcDate.microsecondsSinceEpoch,
+      isUtc: true,
+    );
+    return DateTimeOffsetValue(utc: utcValue, offsetMinutes: offsetMinutes);
+  }
+
+  DecimalValue? _readDecimalValueSync(_TypeInfo typeInfo) {
+    final size = _reader.getByte();
+    if (size == 0) {
+      return null;
+    }
+    if (size < 1) {
+      throw tds.InterfaceError('Comprimento inválido para DECIMAL: $size');
+    }
+    final isPositive = _reader.getByte() == 1;
+    final magnitude = _decodeLittleEndianBigInt(_reader.readBytes(size - 1));
+    final raw = isPositive ? magnitude : -magnitude;
+    return DecimalValue(unscaledValue: raw, scale: typeInfo.scale ?? 0);
+  }
+
+  String? _readGuidValueSync() {
+    final size = _reader.getByte();
+    if (size == 0) {
+      return null;
+    }
+    if (size != 16) {
+      throw tds.InterfaceError('GUID inválido com $size bytes');
+    }
+    return _formatGuid(_reader.readBytes(16));
+  }
+
+  dynamic _readTextValueSync(_TypeInfo typeInfo, {required bool unicode}) {
+    final textPtrSize = _reader.getByte();
+    if (textPtrSize == 0) {
+      return null;
+    }
+    if (textPtrSize > 0) {
+      _reader.readBytes(textPtrSize);
+    }
+    _reader.readBytes(8); // timestamp
+    final length = _reader.getInt();
+    if (length <= 0) {
+      return unicode && _bytesToUnicode ? '' : Uint8List(0);
+    }
+    final data = _reader.readBytes(length);
+    if (!unicode) {
+      return _bytesToUnicode
+          ? _decodeWithCollation(data, typeInfo.collation)
+          : data;
+    }
+    if (!_bytesToUnicode) {
+      return data;
+    }
+    return ucs2Codec.decode(data);
+  }
+
+  dynamic _readXmlValueSync() {
+    final payload = _readPlpBytesSync();
+    if (payload == null) {
+      return null;
+    }
+    if (_bytesToUnicode) {
+      return ucs2Codec.decode(payload);
+    }
+    return payload;
+  }
+
+  Duration _readTimeDurationFromBytes(int size, int precision) {
+    final data = _reader.readBytes(size);
+    var ticks = _decodeLittleEndianInt(data);
+    final scaleDiff = (7 - precision).clamp(0, 7);
+    for (var i = 0; i < scaleDiff; i++) {
+      ticks *= 10;
+    }
+    final nanoseconds = ticks * 100;
+    return Duration(microseconds: nanoseconds ~/ 1000);
+  }
+
+  Uint8List? _readPlpBytesSync() {
+    final declaredLength = _reader.getUInt8();
+    if (declaredLength == tds.PLP_NULL) {
+      return null;
+    }
+    final builder = BytesBuilder(copy: false);
+    var remaining = declaredLength;
+    while (true) {
+      final chunkLength = _reader.getUInt();
+      if (chunkLength == 0) {
+        break;
+      }
+      builder.add(_reader.readBytes(chunkLength));
+      if (remaining != tds.PLP_UNKNOWN) {
+        remaining -= chunkLength;
+      }
+    }
+    return builder.takeBytes();
+  }
+
+  String _formatGuid(List<int> bytes) {
+    final data = ByteData.sublistView(Uint8List.fromList(bytes));
+    final part1 = data.getUint32(0, Endian.little).toRadixString(16).padLeft(8, '0');
+    final part2 = data.getUint16(4, Endian.little).toRadixString(16).padLeft(4, '0');
+    final part3 = data.getUint16(6, Endian.little).toRadixString(16).padLeft(4, '0');
+    final part4 = _formatBytes(bytes.sublist(8, 10));
+    final part5 = _formatBytes(bytes.sublist(10));
+    return '$part1-$part2-$part3-$part4-$part5';
+  }
+
+  String _formatBytes(List<int> bytes) {
+    final buffer = StringBuffer();
+    for (final b in bytes) {
+      buffer.write((b & 0xFF).toRadixString(16).padLeft(2, '0'));
+    }
+    return buffer.toString();
+  }
+
+  dynamic _decodeWithCollation(List<int> data, Collation? collation) {
+    if (!_bytesToUnicode) {
+      return Uint8List.fromList(data);
+    }
+    final codec = collation?.get_codec() ??
+        _connectionCollation?.get_codec() ??
+        latin1;
+    return codec.decode(data);
+  }
+
+  BigInt _decodeLittleEndianBigInt(List<int> bytes) {
+    var result = BigInt.zero;
+    for (var i = bytes.length - 1; i >= 0; i--) {
+      result = (result << 8) | BigInt.from(bytes[i] & 0xFF);
+    }
+    return result;
   }
 
   void _readColumnMetadata(

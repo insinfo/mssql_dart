@@ -36,4 +36,31 @@ void main() {
     expect(socket.env.database?.toLowerCase(), equals(database));
     expect(traces.any((entry) => entry.startsWith('login.ack')), isTrue);
   });
+
+  test('AsyncTdsSocket expõe linhas após processSimpleRequest', () async {
+    final socket = await connectAsync(
+      host: host,
+      port: port,
+      user: user,
+      password: password,
+      database: database,
+      bytesToUnicode: true,
+    );
+    addTearDown(() => socket.close());
+
+    await socket.mainSession
+        .submitPlainQuery('SELECT 10 AS valor UNION ALL SELECT 20');
+    await socket.mainSession.processSimpleRequest();
+
+    expect(socket.hasBufferedRows, isTrue);
+    expect(socket.bufferedRowCount, equals(2));
+
+    final firstRow = socket.takeRow() as List<dynamic>?;
+    expect(firstRow, equals([10]));
+
+    final rest = socket.takeAllRows();
+    expect(rest, hasLength(1));
+    expect(rest.first, equals([20]));
+    expect(socket.hasBufferedRows, isFalse);
+  });
 }

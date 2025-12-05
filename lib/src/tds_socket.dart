@@ -233,6 +233,12 @@ class TdsSocket {
     _mainSession.updateRowStrategy(strategy);
   }
 
+  bool get hasBufferedRows => _mainSession.hasBufferedRows;
+  int get bufferedRowCount => _mainSession.bufferedRowCount;
+  dynamic takeRow() => _mainSession.takeRow();
+  List<dynamic> takeAllRows() => _mainSession.takeAllRows();
+  void clearRowBuffer() => _mainSession.clearRowBuffer();
+
   SessionLink get mainSession => _mainSession;
   bool get isConnected => _isConnected;
   bool get marsEnabled => _marsEnabled;
@@ -240,6 +246,11 @@ class TdsSocket {
   tds.Route? login() {
     if (_isConnected) {
       return route;
+    }
+    if (_login.encFlag != tds.PreLoginEnc.ENCRYPT_NOT_SUP) {
+      throw tds.NotSupportedError(
+        'Conexões síncronas ainda não suportam TLS/Encrypt opções. Use connectAsync para servidores que exigem criptografia.',
+      );
     }
     if (tds.isTds71Plus(_mainSession)) {
       _mainSession.sendPrelogin(_login);

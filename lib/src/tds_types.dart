@@ -179,6 +179,36 @@ class DecimalType extends SqlType {
   String get declaration => 'DECIMAL($precision, $scale)';
 }
 
+class DecimalValue {
+  final BigInt unscaledValue;
+  final int scale;
+  const DecimalValue({required this.unscaledValue, required this.scale});
+
+  bool get isNegative => unscaledValue.isNegative;
+
+  double toDouble() {
+    if (scale == 0) {
+      return unscaledValue.toDouble();
+    }
+    return unscaledValue.toDouble() / math.pow(10, scale);
+  }
+
+  num toNum() => scale == 0 ? unscaledValue.toInt() : toDouble();
+
+  @override
+  String toString() {
+    if (scale == 0) {
+      return unscaledValue.toString();
+    }
+    final absValue = unscaledValue.abs().toString();
+    final padded = absValue.padLeft(scale + 1, '0');
+    final whole = padded.substring(0, padded.length - scale);
+    final frac = padded.substring(padded.length - scale);
+    final sign = unscaledValue.isNegative ? '-' : '';
+    return '$sign$whole.$frac';
+  }
+}
+
 class UniqueIdentifierType extends SqlType {
   const UniqueIdentifierType();
   @override
@@ -228,6 +258,25 @@ class DateTimeOffsetType extends SqlType {
   const DateTimeOffsetType({this.precision = 7});
   @override
   String get declaration => 'DATETIMEOFFSET($precision)';
+}
+
+class DateTimeOffsetValue {
+  final DateTime utc;
+  final int offsetMinutes;
+  const DateTimeOffsetValue({required this.utc, required this.offsetMinutes});
+
+  Duration get offset => Duration(minutes: offsetMinutes);
+  DateTime get localDateTime => utc.add(offset);
+
+  @override
+  String toString() {
+    final absMinutes = offsetMinutes.abs();
+    final hours = (absMinutes ~/ 60).toString().padLeft(2, '0');
+    final minutes = (absMinutes % 60).toString().padLeft(2, '0');
+    final sign = offsetMinutes >= 0 ? '+' : '-';
+    final localIso = localDateTime.toIso8601String();
+    return '$localIso (UTC$sign$hours:$minutes)';
+  }
 }
 
 class TableType extends SqlType {

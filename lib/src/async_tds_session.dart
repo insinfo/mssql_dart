@@ -1,3 +1,4 @@
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -90,6 +91,9 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
   final void Function(tds.Route)? _onRouteChange;
   final void Function(String)? _onUnicodeSortFlags;
   final SessionTraceHook? _traceHook;
+  static final DateTime _baseDate1900 = DateTime.utc(1900, 1, 1);
+  static final DateTime _baseDate0001 = DateTime.utc(1, 1, 1);
+  final Queue<dynamic> _rowBuffer = ListQueue<dynamic>();
 
   final List<tds.Message> _messages = [];
   tds.AuthProtocol? _authentication;
@@ -127,6 +131,8 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
   tds.Results? get results => _results;
   List<dynamic> get currentRow => _currentRow;
   bool get skippedToStatus => _skippedToStatus;
+  bool get hasBufferedRows => _rowBuffer.isNotEmpty;
+  int get bufferedRowCount => _rowBuffer.length;
   String? get lastQuery => _lastQuery;
   tds.TdsEnv get env => _env;
   List<tds.Message> get messages => _messages;
@@ -565,6 +571,7 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
         'Já existe uma operação pendente na sessão atual.',
       );
     }
+    _rowBuffer.clear();
     _messages.clear();
     _rowsAffected = tds.TDS_NO_COUNT;
     _lastQuery = sql;
@@ -919,6 +926,7 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
       _currentRow[i] = await _readColumnValueAsync(safeInfo.columns[i]);
     }
     _trace('row', {'values': List<dynamic>.from(_currentRow)});
+    _bufferRowSnapshot();
   }
 
   Future<void> _processNbcRowToken() async {
@@ -938,7 +946,29 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
       }
     }
     _trace('nbcrow', {'values': List<dynamic>.from(_currentRow)});
+    _bufferRowSnapshot();
   }
+
+  /// Remove e retorna a próxima linha já pronta (após aplicar o [RowStrategy]).
+  dynamic takeRow() {
+    if (_rowBuffer.isEmpty) {
+      return null;
+    }
+    return _rowBuffer.removeFirst();
+  }
+
+  /// Retorna todas as linhas disponíveis e limpa o buffer.
+  List<dynamic> takeAllRows() {
+    if (_rowBuffer.isEmpty) {
+      return const <dynamic>[];
+    }
+    final rows = List<dynamic>.from(_rowBuffer, growable: false);
+    _rowBuffer.clear();
+    return rows;
+  }
+
+  /// Limpa o buffer de linhas sem retorná-las.
+  void clearRowBuffer() => _rowBuffer.clear();
 
   Future<dynamic> _readColumnValueAsync(tds.Column column) async {
     final typeInfo = column.serializer;
@@ -958,6 +988,37 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
         return await _reader.getInt8();
       case tds.INTNTYPE:
         return await _readIntnValueAsync();
+      case tds.FLT4TYPE:
+        return await _readFloat32ValueAsync();
+      case tds.FLT8TYPE:
+        return await _readFloat64ValueAsync();
+      case tds.FLTNTYPE:
+        return await _readFloatnValueAsync();
+      case tds.MONEYTYPE:
+        return await _readMoneyValueAsync(8);
+      case tds.MONEY4TYPE:
+        return await _readMoneyValueAsync(4);
+      case tds.MONEYNTYPE:
+        return await _readMoneynValueAsync();
+      case tds.DATETIMETYPE:
+        return await _readDateTimeValueAsync();
+      case tds.DATETIM4TYPE:
+        return await _readSmallDateTimeValueAsync();
+      case tds.DATETIMNTYPE:
+        return await _readDateTimenValueAsync();
+      case tds.DATENTYPE:
+        return await _readDateValueAsync();
+      case tds.TIMENTYPE:
+        return await _readTimeValueAsync(typeInfo);
+      case tds.DATETIME2NTYPE:
+        return await _readDateTime2ValueAsync(typeInfo);
+      case tds.DATETIMEOFFSETNTYPE:
+        return await _readDateTimeOffsetValueAsync(typeInfo);
+      case tds.DECIMALNTYPE:
+      case tds.NUMERICNTYPE:
+        return await _readDecimalValueAsync(typeInfo);
+      case tds.GUIDTYPE:
+        return await _readGuidValueAsync();
       case tds.BIGVARCHRTYPE:
       case tds.BIGCHARTYPE:
         return await _readAnsiValueAsync(lengthBytes: 2);
@@ -975,6 +1036,12 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
       case tds.SYBVARBINARY:
       case tds.BINARYTYPE:
         return await _readBinaryValueAsync(lengthBytes: 1);
+      case tds.TEXTTYPE:
+        return await _readTextValueAsync(typeInfo, unicode: false);
+      case tds.NTEXTTYPE:
+        return await _readTextValueAsync(typeInfo, unicode: true);
+      case tds.XMLTYPE:
+        return await _readXmlValueAsync();
       default:
         throw tds.NotSupportedError(
           'Leitura de valores para o tipo ${typeInfo.typeId} ainda não foi portada',
@@ -1037,6 +1104,279 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
     }
     final data = await _reader.readBytes(byteLength);
     return _bytesToUnicode ? ucs2Codec.decode(data) : data;
+  }
+
+  void _bufferRowSnapshot() {
+    final hasResults = _results != null && _currentRow.isNotEmpty;
+    if (!hasResults) {
+      return;
+    }
+    final snapshot = List<dynamic>.from(_currentRow, growable: false);
+    final materialized = _rowConvertor(snapshot);
+    _rowBuffer.add(materialized);
+  }
+
+  Future<double> _readFloat32ValueAsync() async {
+    final bytes = await _reader.readBytes(4);
+    return ByteData.sublistView(bytes).getFloat32(0, Endian.little);
+  }
+
+  Future<double> _readFloat64ValueAsync() async {
+    final bytes = await _reader.readBytes(8);
+    return ByteData.sublistView(bytes).getFloat64(0, Endian.little);
+  }
+
+  Future<double?> _readFloatnValueAsync() async {
+    final length = await _reader.getByte();
+    if (length == 0) {
+      return null;
+    }
+    switch (length) {
+      case 4:
+        return await _readFloat32ValueAsync();
+      case 8:
+        return await _readFloat64ValueAsync();
+      default:
+        throw tds.InterfaceError('Comprimento inválido para FLOATN: $length');
+    }
+  }
+
+  Future<double> _readMoneyValueAsync(int length) async {
+    if (length == 4) {
+      return (await _reader.getInt()) / 10000.0;
+    }
+    if (length == 8) {
+      return (await _reader.getInt8()) / 10000.0;
+    }
+    throw tds.InterfaceError('Comprimento inválido para MONEY: $length');
+  }
+
+  Future<double?> _readMoneynValueAsync() async {
+    final length = await _reader.getByte();
+    if (length == 0) {
+      return null;
+    }
+    return await _readMoneyValueAsync(length);
+  }
+
+  Future<DateTime> _readDateTimeValueAsync() async {
+    final days = await _reader.getInt();
+    final ticks = await _reader.getUInt();
+    final base = _baseDate1900.add(Duration(days: days));
+    final micros = (ticks * 1000000) ~/ 300;
+    return base.add(Duration(microseconds: micros));
+  }
+
+  Future<DateTime> _readSmallDateTimeValueAsync() async {
+    final days = await _reader.getUSmallInt();
+    final minutes = await _reader.getUSmallInt();
+    return _baseDate1900.add(Duration(days: days, minutes: minutes));
+  }
+
+  Future<DateTime?> _readDateTimenValueAsync() async {
+    final length = await _reader.getByte();
+    if (length == 0) {
+      return null;
+    }
+    if (length == 4) {
+      return await _readSmallDateTimeValueAsync();
+    }
+    if (length == 8) {
+      return await _readDateTimeValueAsync();
+    }
+    throw tds.InterfaceError('Comprimento inválido para DATETIMN: $length');
+  }
+
+  Future<DateTime?> _readDateValueAsync() async {
+    final length = await _reader.getByte();
+    if (length == 0) {
+      return null;
+    }
+    if (length != 3) {
+      throw tds.InterfaceError('Comprimento inválido para DATE: $length');
+    }
+    final days = _decodeLittleEndianInt(await _reader.readBytes(3));
+    return _baseDate0001.add(Duration(days: days));
+  }
+
+  Future<Duration?> _readTimeValueAsync(_TypeInfo typeInfo) async {
+    final length = await _reader.getByte();
+    if (length == 0) {
+      return null;
+    }
+    final precision = typeInfo.precision ?? 7;
+    return await _readTimeDurationFromBytesAsync(length, precision);
+  }
+
+  Future<DateTime?> _readDateTime2ValueAsync(_TypeInfo typeInfo) async {
+    final size = await _reader.getByte();
+    if (size == 0) {
+      return null;
+    }
+    if (size < 3) {
+      throw tds.InterfaceError('Comprimento inválido para DATETIME2: $size');
+    }
+    final precision = typeInfo.precision ?? 7;
+    final timeSize = size - 3;
+    final time = await _readTimeDurationFromBytesAsync(timeSize, precision);
+    final days = _decodeLittleEndianInt(await _reader.readBytes(3));
+    return _baseDate0001.add(Duration(days: days)).add(time);
+  }
+
+  Future<DateTimeOffsetValue?> _readDateTimeOffsetValueAsync(
+    _TypeInfo typeInfo,
+  ) async {
+    final size = await _reader.getByte();
+    if (size == 0) {
+      return null;
+    }
+    if (size < 5) {
+      throw tds.InterfaceError(
+        'Comprimento inválido para DATETIMEOFFSET: $size',
+      );
+    }
+    final precision = typeInfo.precision ?? 7;
+    final timeSize = size - 5;
+    final time = await _readTimeDurationFromBytesAsync(timeSize, precision);
+    final days = _decodeLittleEndianInt(await _reader.readBytes(3));
+    final offsetMinutes = await _reader.getSmallInt();
+    final utcDate = _baseDate0001.add(Duration(days: days)).add(time);
+    final utcValue = DateTime.fromMicrosecondsSinceEpoch(
+      utcDate.microsecondsSinceEpoch,
+      isUtc: true,
+    );
+    return DateTimeOffsetValue(utc: utcValue, offsetMinutes: offsetMinutes);
+  }
+
+  Future<DecimalValue?> _readDecimalValueAsync(_TypeInfo typeInfo) async {
+    final size = await _reader.getByte();
+    if (size == 0) {
+      return null;
+    }
+    if (size < 1) {
+      throw tds.InterfaceError('Comprimento inválido para DECIMAL: $size');
+    }
+    final isPositive = await _reader.getByte() == 1;
+    final magnitude = _decodeLittleEndianBigInt(await _reader.readBytes(size - 1));
+    final raw = isPositive ? magnitude : -magnitude;
+    return DecimalValue(unscaledValue: raw, scale: typeInfo.scale ?? 0);
+  }
+
+  Future<String?> _readGuidValueAsync() async {
+    final size = await _reader.getByte();
+    if (size == 0) {
+      return null;
+    }
+    if (size != 16) {
+      throw tds.InterfaceError('GUID inválido com $size bytes');
+    }
+    return _formatGuid(await _reader.readBytes(16));
+  }
+
+  Future<dynamic> _readTextValueAsync(
+    _TypeInfo typeInfo, {
+    required bool unicode,
+  }) async {
+    final textPtrSize = await _reader.getByte();
+    if (textPtrSize == 0) {
+      return null;
+    }
+    if (textPtrSize > 0) {
+      await _reader.readBytes(textPtrSize);
+    }
+    await _reader.readBytes(8);
+    final length = await _reader.getInt();
+    if (length <= 0) {
+      return unicode && _bytesToUnicode ? '' : Uint8List(0);
+    }
+    final data = await _reader.readBytes(length);
+    if (!unicode) {
+      return _bytesToUnicode
+          ? _decodeWithCollation(data, typeInfo.collation)
+          : data;
+    }
+    if (!_bytesToUnicode) {
+      return data;
+    }
+    return ucs2Codec.decode(data);
+  }
+
+  Future<dynamic> _readXmlValueAsync() async {
+    final payload = await _readPlpBytesAsync();
+    if (payload == null) {
+      return null;
+    }
+    return _bytesToUnicode ? ucs2Codec.decode(payload) : payload;
+  }
+
+  Future<Duration> _readTimeDurationFromBytesAsync(
+    int size,
+    int precision,
+  ) async {
+    final data = await _reader.readBytes(size);
+    var ticks = _decodeLittleEndianInt(data);
+    final scaleDiff = (7 - precision).clamp(0, 7);
+    for (var i = 0; i < scaleDiff; i++) {
+      ticks *= 10;
+    }
+    final nanoseconds = ticks * 100;
+    return Duration(microseconds: nanoseconds ~/ 1000);
+  }
+
+  Future<Uint8List?> _readPlpBytesAsync() async {
+    final declaredLength = await _reader.getUInt8();
+    if (declaredLength == tds.PLP_NULL) {
+      return null;
+    }
+    final builder = BytesBuilder(copy: false);
+    var remaining = declaredLength;
+    while (true) {
+      final chunkLength = await _reader.getUInt();
+      if (chunkLength == 0) {
+        break;
+      }
+      builder.add(await _reader.readBytes(chunkLength));
+      if (remaining != tds.PLP_UNKNOWN) {
+        remaining -= chunkLength;
+      }
+    }
+    return builder.takeBytes();
+  }
+
+  String _formatGuid(List<int> bytes) {
+    final data = ByteData.sublistView(Uint8List.fromList(bytes));
+    final part1 = data.getUint32(0, Endian.little).toRadixString(16).padLeft(8, '0');
+    final part2 = data.getUint16(4, Endian.little).toRadixString(16).padLeft(4, '0');
+    final part3 = data.getUint16(6, Endian.little).toRadixString(16).padLeft(4, '0');
+    final part4 = _formatBytes(bytes.sublist(8, 10));
+    final part5 = _formatBytes(bytes.sublist(10));
+    return '$part1-$part2-$part3-$part4-$part5';
+  }
+
+  String _formatBytes(List<int> bytes) {
+    final buffer = StringBuffer();
+    for (final b in bytes) {
+      buffer.write((b & 0xFF).toRadixString(16).padLeft(2, '0'));
+    }
+    return buffer.toString();
+  }
+
+  dynamic _decodeWithCollation(List<int> data, Collation? collation) {
+    if (!_bytesToUnicode) {
+      return Uint8List.fromList(data);
+    }
+    final codec = collation?.get_codec() ??
+        _connectionCollation?.get_codec() ??
+        latin1;
+    return codec.decode(data);
+  }
+
+  BigInt _decodeLittleEndianBigInt(List<int> bytes) {
+    var result = BigInt.zero;
+    for (var i = bytes.length - 1; i >= 0; i--) {
+      result = (result << 8) | BigInt.from(bytes[i] & 0xFF);
+    }
+    return result;
   }
 
   Future<void> _readColumnMetadata(

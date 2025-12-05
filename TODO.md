@@ -27,6 +27,7 @@ use o comando rg para buscar no codigo fonte
 - [ ] 2025-12-05: Integrar TLS real via `SecureSocket`, respeitando `encFlag`, `encLoginOnly`, `validateHost` e `cafile`, com capacidade de trocar o socket dentro do transporte (sem depender de `RawSynchronousSocket`).
 - [x] 2025-12-05: Criar `AsyncTdsSession`/`AsyncTdsSocket` para usar o transporte async, garantindo `sendPrelogin/login/processLoginTokens` em `Future`, cancelamentos e hooks de trace equivalentes (novos `connectAsync`, `AsyncSessionLink` e `AsyncSessionBuilder`).
 - [x] 2025-12-05: Adicionar testes de integração async (ex.: `dart_login_async_test.dart`) cobrindo handshake básico com `connectAsync`, validando `login.ack` e `env.database` iguais ao fluxo síncrono.
+- [x] 2025-12-05: `connectAsync`/`_buildLogin` passaram a aceitar `cafile`, `SecurityContext`, `validateHost` e `encLoginOnly`, adicionando o helper `buildLoginForTesting` e testes unitários para garantir que os flags de criptografia sejam configurados corretamente.
 - [ ] Próximo ciclo (quebrado em etapas):
 	1. Portar `pytds/tls.py` (`establish_channel`/`revert_to_clear`), usando `SecureSocket` ou wrapper síncrono e expondo swap de transporte em `SocketTransport`.
 	2. Completar `_TdsSession`: loop de tokens para result sets reais (`COLMETADATA`/NBCROW/ROWS), RPCs, parâmetros de saída, cancelamentos e transações.

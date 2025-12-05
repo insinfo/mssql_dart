@@ -89,6 +89,12 @@ class AsyncTdsSocket {
     _mainSession.updateRowStrategy(strategy);
   }
 
+  bool get hasBufferedRows => _mainSession.hasBufferedRows;
+  int get bufferedRowCount => _mainSession.bufferedRowCount;
+  dynamic takeRow() => _mainSession.takeRow();
+  List<dynamic> takeAllRows() => _mainSession.takeAllRows();
+  void clearRowBuffer() => _mainSession.clearRowBuffer();
+
   AsyncSessionLink get mainSession => _mainSession;
   bool get isConnected => _isConnected;
   bool get marsEnabled => _marsEnabled;
