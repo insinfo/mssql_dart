@@ -13,6 +13,10 @@ import 'tds_types.dart';
 
 const int _clientLibraryVersion = 0x01000000;
 const String _defaultInstanceName = 'MSSQLServer';
+const int _tmBeginXact = 5;
+const int _tmCommitXact = 7;
+const int _tmRollbackXact = 8;
+const int _tmFlagChain = 1;
 
 /// Builder padrão usado enquanto o restante do port não disponibiliza uma
 /// sessão completa.
@@ -56,6 +60,7 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
       session: this,
       bufsize: bufsize,
     );
+    _rebuildTypeInferrer();
   }
 
   factory TdsSession.fromContext(SessionBuildContext context) {
@@ -106,10 +111,15 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
   bool _hasStatus = false;
   bool _inCancel = false;
   bool _moreRows = false;
+  int _transactionId = 0;
   Collation? _collation;
   tds.Results? _results;
   List<dynamic> _currentRow = const <dynamic>[];
   bool _skippedToStatus = false;
+  final Map<int, tds.Column> _outputParams = <int, tds.Column>{};
+  List<int> _outParamOrdinals = const <int>[];
+  int _returnValueIndex = 0;
+  late TdsTypeInferrer _typeInferrer;
   void _trace(String event, [Map<String, Object?>? data]) {
     final hook = _traceHook;
     if (hook == null) {
@@ -172,6 +182,8 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
   bool get skippedToStatus => _skippedToStatus;
   bool get hasBufferedRows => _rowBuffer.isNotEmpty;
   int get bufferedRowCount => _rowBuffer.length;
+  Map<int, tds.Column> get outputParameters =>
+      Map.unmodifiable(_outputParams);
 
   String? get lastQuery => _lastQuery;
 
@@ -511,9 +523,8 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
         'Já existe uma operação pendente na sessão atual.',
       );
     }
-    _rowBuffer.clear();
+    _resetResultsState(clearRowBuffer: true);
     _messages.clear();
-    _rowsAffected = tds.TDS_NO_COUNT;
     _lastQuery = sql;
     _writer.beginPacket(tds.PacketType.QUERY);
     if (tds.isTds72Plus(this)) {
@@ -528,15 +539,163 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     _state = tds.TDS_PENDING;
   }
 
+  void submitExecSql(String sql, Map<String, dynamic> params) {
+    if (params.isEmpty) {
+      submitPlainQuery(sql);
+      return;
+    }
+    final converted = _convertParams(params);
+    if (converted.isEmpty) {
+      submitPlainQuery(sql);
+      return;
+    }
+    final definition = _buildParamDefinition(converted);
+    final assignments = _buildParamAssignments(converted);
+    final batch = StringBuffer('EXEC sp_executesql N')
+      ..write(_escapeUnicodeLiteral(sql))
+      ..write(', N')
+      ..write(_escapeUnicodeLiteral(definition));
+    if (assignments.isNotEmpty) {
+      batch.write(', ');
+      batch.write(assignments.join(', '));
+    }
+    submitPlainQuery(batch.toString());
+  }
+
   @override
   void processSimpleRequest() {
     beginResponse();
     _drainUntilDone();
   }
 
+  void submitRpc(
+    Object rpcName,
+    List<tds.Param> params, {
+    int flags = 0,
+  }) {
+    if (_state != tds.TDS_IDLE) {
+      throw tds.InterfaceError(
+        'Já existe uma operação pendente na sessão atual.',
+      );
+    }
+    if (params.isNotEmpty) {
+      throw tds.NotSupportedError(
+        'Envio de parâmetros em RPC ainda não foi portado (depende do serializer real).',
+      );
+    }
+    _resetResultsState(clearRowBuffer: true);
+    _messages.clear();
+    final writer = _writer;
+    writer.beginPacket(tds.PacketType.RPC);
+    if (tds.isTds72Plus(this)) {
+      _startQuery();
+    }
+    if (tds.isTds71Plus(this) && rpcName is tds.InternalProc) {
+      writer.putSmallInt(-1);
+      writer.putSmallInt(rpcName.procId);
+    } else {
+      final procName = rpcName is tds.InternalProc ? rpcName.name : '$rpcName';
+      writer.putSmallInt(procName.length);
+      writer.writeUcs2(procName);
+    }
+    writer.putUSmallInt(flags);
+    _outParamOrdinals = const <int>[];
+    _trace('rpc.submit', {
+      'name': rpcName is tds.InternalProc ? rpcName.name : '$rpcName',
+      'flags': flags,
+      'params': params.length,
+    });
+    writer.flush();
+    _state = tds.TDS_PENDING;
+  }
+
+  bool processRpc() {
+    _doneFlags = 0;
+    _returnValueIndex = 0;
+    while (true) {
+      final marker = _nextTokenId();
+      if (marker == tds.TDS7_RESULT_TOKEN) {
+        _processResultToken();
+        return true;
+      }
+      if (_isDoneToken(marker)) {
+        _processDone(marker);
+        final hasMore = (_doneFlags & tds.TDS_DONE_MORE_RESULTS) != 0;
+        final hasCount = (_doneFlags & tds.TDS_DONE_COUNT) != 0;
+        if (hasMore && !hasCount) {
+          continue;
+        }
+        return false;
+      }
+      if (_handleCommonToken(marker)) {
+        continue;
+      }
+      _skipToken(marker);
+    }
+  }
+
+  void completeRpc() {
+    while (nextSet() == true) {
+      // Continua até que não existam mais conjuntos.
+    }
+  }
+
+  void findReturnStatus() {
+    _skippedToStatus = true;
+    while (true) {
+      final marker = _nextTokenId();
+      if (marker == tds.TDS_RETURNSTATUS_TOKEN) {
+        _processReturnStatus();
+        return;
+      }
+      if (_handleCommonToken(marker)) {
+        continue;
+      }
+      if (_isDoneToken(marker)) {
+        _processDone(marker);
+        if ((_doneFlags & tds.TDS_DONE_MORE_RESULTS) == 0) {
+          return;
+        }
+        continue;
+      }
+      _skipToken(marker);
+    }
+  }
+
   @override
   void cancel() {
     _sendCancel();
+  }
+
+  @override
+  void beginTransaction({int? isolationLevel}) {
+    final level = isolationLevel ?? _env.isolationLevel;
+    _submitBeginTransaction(level);
+    processSimpleRequest();
+  }
+
+  @override
+  void commitTransaction({bool startNew = false}) {
+    if (_env.autocommit || _transactionId == 0) {
+      return;
+    }
+    _submitCommitTransaction(
+      startNew: startNew,
+      isolationLevel: _env.isolationLevel,
+    );
+    processSimpleRequest();
+  }
+
+  @override
+  void rollbackTransaction({bool startNew = false}) {
+    if (_env.autocommit || _transactionId == 0) {
+      return;
+    }
+    _submitRollbackTransaction(
+      startNew: startNew,
+      isolationLevel: _env.isolationLevel,
+    );
+    processSimpleRequest();
   }
 
   void _drainUntilDone() {
@@ -571,6 +730,9 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
         return true;
       case tds.TDS_RETURNSTATUS_TOKEN:
         _processReturnStatus();
+        return true;
+      case tds.TDS_PARAM_TOKEN:
+        _processReturnValueToken();
         return true;
       case tds.TDS7_RESULT_TOKEN:
         _processResultToken();
@@ -679,6 +841,7 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
           _collation = Collation.unpack(bytes);
           _connectionCollation = _collation;
           _onCollationChanged?.call(_collation);
+          _rebuildTypeInferrer();
           traceData['new'] = _collation?.toString();
           final extra = payload - Collation.wire_size;
           if (extra > 0) {
@@ -747,6 +910,7 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
           _reader.readBytes(oldSize);
         }
         if (txnValue != null) {
+          _transactionId = txnValue;
           _onTransactionStateChange?.call(txnValue);
           traceData['new'] = txnValue;
         }
@@ -761,6 +925,7 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
         if (oldTxSize > 0) {
           _reader.readBytes(oldTxSize);
         }
+        _transactionId = 0;
         _onTransactionStateChange?.call(0);
         traceData['new'] = 0;
         break;
@@ -833,7 +998,6 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     }
   }
 
-  // ignore: unused_element
   void _processResultToken() {
     final columnCount = _reader.getSmallInt();
     if (columnCount == -1) {
@@ -891,6 +1055,39 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     _bufferRowSnapshot();
   }
 
+  void _processReturnValueToken() {
+    final isTds72Plus = tds.isTds72Plus(this);
+    int ordinal;
+    if (isTds72Plus) {
+      ordinal = _reader.getUSmallInt();
+    } else {
+      _reader.getUSmallInt();
+      if (_outParamOrdinals.isNotEmpty &&
+          _returnValueIndex < _outParamOrdinals.length) {
+        ordinal = _outParamOrdinals[_returnValueIndex];
+      } else {
+        ordinal = _returnValueIndex;
+      }
+    }
+    final nameLength = _reader.getByte();
+    final name = nameLength > 0 ? _reader.readUcs2(nameLength) : '';
+    _reader.getByte();
+    final typeId = _reader.getByte();
+    final typeInfo = _readTypeInfoPayload(typeId);
+    final column = tds.Column()
+      ..columnName = name
+      ..type = typeId
+      ..serializer = typeInfo;
+    column.value = _readColumnValueSync(column);
+    _outputParams[ordinal] = column;
+    _returnValueIndex += 1;
+    _trace('rpc.returnvalue', {
+      'ordinal': ordinal,
+      'name': name,
+      'type': typeId,
+    });
+  }
+
   /// Remove e devolve a próxima linha já materializada pelo [RowStrategy].
   dynamic takeRow() {
     if (_rowBuffer.isEmpty) {
@@ -911,6 +1108,92 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
 
   /// Descarrega as linhas já lidas sem retorná-las.
   void clearRowBuffer() => _rowBuffer.clear();
+
+  void _resetResultsState({bool clearRowBuffer = false}) {
+    if (clearRowBuffer) {
+      _rowBuffer.clear();
+    }
+    _results = null;
+    _currentRow = const <dynamic>[];
+    _rowsAffected = tds.TDS_NO_COUNT;
+    _moreRows = false;
+    _skippedToStatus = false;
+    _hasStatus = false;
+    _returnStatus = null;
+    _outputParams.clear();
+    _outParamOrdinals = const <int>[];
+    _returnValueIndex = 0;
+    _rebuildRowFactory(columnNames: const <String>[]);
+  }
+
+  bool? nextSet() {
+    while (_moreRows && nextRow()) {
+      // Continua drenando o conjunto atual até o DONE chegar.
+    }
+    if (_state == tds.TDS_IDLE) {
+      return false;
+    }
+    if (findResultOrDone()) {
+      return true;
+    }
+    return null;
+  }
+
+  bool findResultOrDone() {
+    _doneFlags = 0;
+    while (true) {
+      final marker = _nextTokenId();
+      if (marker == tds.TDS7_RESULT_TOKEN) {
+        _processResultToken();
+        return true;
+      }
+      if (_isDoneToken(marker)) {
+        _processDone(marker);
+        final hasMore = (_doneFlags & tds.TDS_DONE_MORE_RESULTS) != 0;
+        if (!hasMore) {
+          return false;
+        }
+        if ((_doneFlags & tds.TDS_DONE_COUNT) != 0) {
+          return true;
+        }
+        continue;
+      }
+      if (_handleCommonToken(marker)) {
+        continue;
+      }
+      _skipToken(marker);
+    }
+  }
+
+  bool nextRow() {
+    if (_results == null) {
+      throw tds.ProgrammingError(
+        'A operação anterior não retornou resultados.',
+      );
+    }
+    if (!_moreRows) {
+      return false;
+    }
+    while (true) {
+      final marker = _nextTokenId();
+      if (marker == tds.TDS_ROW_TOKEN) {
+        _processRowToken();
+        return true;
+      }
+      if (marker == tds.TDS_NBC_ROW_TOKEN) {
+        _processNbcRowToken();
+        return true;
+      }
+      if (_isDoneToken(marker)) {
+        _processDone(marker);
+        return false;
+      }
+      if (_handleCommonToken(marker)) {
+        continue;
+      }
+      _skipToken(marker);
+    }
+  }
 
   dynamic _readColumnValueSync(tds.Column column) {
     final typeInfo = column.serializer;
@@ -1499,6 +1782,7 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     if (bytesToUnicode != null) {
       _bytesToUnicode = bytesToUnicode;
     }
+    _rebuildTypeInferrer();
   }
 
   @override
@@ -1506,16 +1790,403 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     _setRowStrategy(strategy);
   }
 
+  void _rebuildTypeInferrer() {
+    _typeInferrer = TdsTypeInferrer(
+      typeFactory: _typeFactory,
+      collation: _connectionCollation ?? raw_collation,
+      bytesToUnicode: _bytesToUnicode,
+      allowTz: false,
+    );
+  }
+
+  void _submitBeginTransaction(int isolationLevel) {
+    if (_state != tds.TDS_IDLE) {
+      throw tds.InterfaceError(
+        'Já existe uma operação pendente na sessão atual.',
+      );
+    }
+    if (!tds.isTds72Plus(this)) {
+      submitPlainQuery('BEGIN TRANSACTION');
+      _transactionId = 1;
+      _onTransactionStateChange?.call(_transactionId);
+      return;
+    }
+    _resetResultsState(clearRowBuffer: true);
+    _messages.clear();
+    final writer = _writer;
+    writer.beginPacket(tds.PacketType.TRANS);
+    _startQuery();
+    final payload = ByteData(4)
+      ..setUint16(0, _tmBeginXact, Endian.little)
+      ..setUint8(2, isolationLevel)
+      ..setUint8(3, 0);
+    writer.write(payload.buffer.asUint8List());
+    writer.flush();
+    _state = tds.TDS_PENDING;
+    _trace('tran.begin', {'isolation': isolationLevel});
+  }
+
+  void _submitCommitTransaction({
+    required bool startNew,
+    required int isolationLevel,
+  }) {
+    if (_state != tds.TDS_IDLE) {
+      throw tds.InterfaceError(
+        'Já existe uma operação pendente na sessão atual.',
+      );
+    }
+    if (!tds.isTds72Plus(this)) {
+      final sql = startNew
+          ? 'IF @@TRANCOUNT > 0 COMMIT BEGIN TRANSACTION'
+          : 'IF @@TRANCOUNT > 0 COMMIT';
+      submitPlainQuery(sql);
+      _transactionId = startNew ? 1 : 0;
+      _onTransactionStateChange?.call(_transactionId);
+      return;
+    }
+    _resetResultsState(clearRowBuffer: true);
+    _messages.clear();
+    final writer = _writer;
+    writer.beginPacket(tds.PacketType.TRANS);
+    _startQuery();
+    final flags = startNew ? _tmFlagChain : 0;
+    final payload = ByteData(4)
+      ..setUint16(0, _tmCommitXact, Endian.little)
+      ..setUint8(2, 0)
+      ..setUint8(3, flags);
+    writer.write(payload.buffer.asUint8List());
+    if (startNew) {
+      final continuation = ByteData(2)
+        ..setUint8(0, isolationLevel)
+        ..setUint8(1, 0);
+      writer.write(continuation.buffer.asUint8List());
+    }
+    writer.flush();
+    _state = tds.TDS_PENDING;
+    _trace('tran.commit', {'chain': startNew, 'flags': flags});
+  }
+
+  void _submitRollbackTransaction({
+    required bool startNew,
+    required int isolationLevel,
+  }) {
+    if (_state != tds.TDS_IDLE) {
+      throw tds.InterfaceError(
+        'Já existe uma operação pendente na sessão atual.',
+      );
+    }
+    if (!tds.isTds72Plus(this)) {
+      final sql = startNew
+          ? 'IF @@TRANCOUNT > 0 ROLLBACK BEGIN TRANSACTION'
+          : 'IF @@TRANCOUNT > 0 ROLLBACK';
+      submitPlainQuery(sql);
+      _transactionId = startNew ? 1 : 0;
+      _onTransactionStateChange?.call(_transactionId);
+      return;
+    }
+    _resetResultsState(clearRowBuffer: true);
+    _messages.clear();
+    final writer = _writer;
+    writer.beginPacket(tds.PacketType.TRANS);
+    _startQuery();
+    final flags = startNew ? _tmFlagChain : 0;
+    final payload = ByteData(4)
+      ..setUint16(0, _tmRollbackXact, Endian.little)
+      ..setUint8(2, 0)
+      ..setUint8(3, flags);
+    writer.write(payload.buffer.asUint8List());
+    if (startNew) {
+      final continuation = ByteData(2)
+        ..setUint8(0, isolationLevel)
+        ..setUint8(1, 0);
+      writer.write(continuation.buffer.asUint8List());
+    }
+    writer.flush();
+    _state = tds.TDS_PENDING;
+    _trace('tran.rollback', {'chain': startNew, 'flags': flags});
+  }
+
   void _startQuery() {
     final data = ByteData(22)
       ..setUint32(0, 0x16, Endian.little)
       ..setUint32(4, 0x12, Endian.little)
       ..setUint16(8, 2, Endian.little)
-      ..setUint64(10, 0, Endian.little)
+      ..setUint64(10, _transactionId, Endian.little)
       ..setUint32(18, 1, Endian.little);
     _writer.write(data.buffer.asUint8List());
     _trace('query.start', {'tran': _env.isolationLevel});
   }
+
+  List<tds.Param> _convertParams(Map<String, dynamic> params) {
+    final bindings = <tds.Param>[];
+    params.forEach((key, value) {
+      bindings.add(_makeParam(key, value));
+    });
+    return bindings;
+  }
+
+  tds.Param _makeParam(
+    String name,
+    dynamic value, {
+    SqlType? forcedType,
+  }) {
+    if (value is tds.Param) {
+      final effectiveName = value.name.isNotEmpty ? value.name : name;
+      final normalized = _normalizeParamName(effectiveName);
+      final sqlType = value.type is SqlType
+          ? value.type as SqlType
+          : forcedType ?? _typeInferrer.fromValue(value.value);
+      return tds.Param(
+        name: normalized,
+        type: sqlType,
+        value: value.value,
+        flags: value.flags,
+      );
+    }
+    final normalized = _normalizeParamName(name);
+    final sqlType = forcedType ?? _typeInferrer.fromValue(value);
+    return tds.Param(
+      name: normalized,
+      type: sqlType,
+      value: value,
+    );
+  }
+
+  String _normalizeParamName(String name) {
+    if (name.isEmpty) {
+      return '';
+    }
+    return name.startsWith('@') ? name : '@$name';
+  }
+
+  String _buildParamDefinition(List<tds.Param> params) {
+    return params
+        .map((param) {
+          final sqlType = param.type;
+          if (sqlType is! SqlType) {
+            throw tds.InterfaceError(
+              'Tipo de parâmetro ausente para ${param.name}',
+            );
+          }
+          return '${param.name} ${sqlType.declaration}';
+        })
+        .join(', ');
+  }
+
+  List<String> _buildParamAssignments(List<tds.Param> params) {
+    final assignments = <String>[];
+    for (final param in params) {
+      assignments.add('${param.name} = ${_formatLiteral(param)}');
+    }
+    return assignments;
+  }
+
+  String _formatLiteral(tds.Param param) {
+    final sqlType = param.type;
+    final value = param.value;
+    if (value == null) {
+      return 'NULL';
+    }
+    if (sqlType is! SqlType) {
+      throw tds.InterfaceError(
+        'Não é possível inferir o tipo SQL para ${param.name}',
+      );
+    }
+    if (sqlType is BitType) {
+      return (value == true) ? '1' : '0';
+    }
+    if (sqlType is TinyIntType ||
+        sqlType is SmallIntType ||
+        sqlType is IntType ||
+        sqlType is BigIntType) {
+      return _formatIntegerLiteral(value);
+    }
+    if (sqlType is FloatType || sqlType is RealType) {
+      return _formatFloatLiteral(value);
+    }
+    if (sqlType is DecimalType) {
+      return _formatDecimalLiteral(value);
+    }
+    if (sqlType is NVarCharType || sqlType is NVarCharMaxType) {
+      final text = _coerceString(value);
+      return 'N${_escapeUnicodeLiteral(text)}';
+    }
+    if (sqlType is VarBinaryType || sqlType is VarBinaryMaxType) {
+      return _formatBinaryLiteral(value);
+    }
+    if (sqlType is DateType) {
+      return _formatDateLiteral(value);
+    }
+    if (sqlType is TimeType) {
+      return _formatTimeLiteral(value, sqlType.precision);
+    }
+    if (sqlType is DateTime2Type) {
+      return _formatDateTimeLiteral(value, sqlType.precision);
+    }
+    if (sqlType is UniqueIdentifierType) {
+      final text = _coerceString(value);
+      return _escapeUnicodeLiteral(text);
+    }
+    throw tds.NotSupportedError(
+      'Parâmetros do tipo ${sqlType.declaration} ainda não são suportados.',
+    );
+  }
+
+  String _formatIntegerLiteral(dynamic value) {
+    if (value is int || value is BigInt) {
+      return value.toString();
+    }
+    if (value is num && value == value.truncate()) {
+      return value.toInt().toString();
+    }
+    throw tds.DataError('Valor inteiro inválido: ${value.runtimeType}');
+  }
+
+  String _formatFloatLiteral(dynamic value) {
+    if (value is num) {
+      if (value is double) {
+        if (value.isNaN || value.isInfinite) {
+          throw tds.DataError('Valores especiais não são permitidos em FLOAT');
+        }
+      }
+      return value.toString();
+    }
+    throw tds.DataError('Valor numérico inválido: ${value.runtimeType}');
+  }
+
+  String _formatDecimalLiteral(dynamic value) {
+    if (value is DecimalValue) {
+      return value.toString();
+    }
+    if (value is num) {
+      return value.toString();
+    }
+    throw tds.DataError('Valor decimal inválido: ${value.runtimeType}');
+  }
+
+  String _formatBinaryLiteral(dynamic value) {
+    Uint8List buffer;
+    if (value is Uint8List) {
+      buffer = value;
+    } else if (value is List<int>) {
+      buffer = Uint8List.fromList(value);
+    } else {
+      throw tds.DataError('Valor binário inválido: ${value.runtimeType}');
+    }
+    final out = StringBuffer('0x');
+    for (final byte in buffer) {
+      out.write(byte.toRadixString(16).padLeft(2, '0'));
+    }
+    return out.toString();
+  }
+
+  String _formatDateLiteral(dynamic value) {
+    if (value is! DateTime) {
+      throw tds.DataError('Valor DATE inválido: ${value.runtimeType}');
+    }
+    final date = value.toLocal();
+    final literal =
+        '${_fourDigits(date.year)}-${_twoDigits(date.month)}-${_twoDigits(date.day)}';
+    return 'CONVERT(DATE, N${_escapeUnicodeLiteral(literal)}, 23)';
+  }
+
+  String _formatTimeLiteral(dynamic value, int precision) {
+    DateTime reference;
+    if (value is DateTime) {
+      reference = value.toLocal();
+    } else if (value is Duration) {
+      reference = DateTime(1970, 1, 1).add(value);
+    } else {
+      throw tds.DataError('Valor TIME inválido: ${value.runtimeType}');
+    }
+    final literal = _buildTimeLiteral(reference, precision);
+    return 'CONVERT(TIME($precision), N${_escapeUnicodeLiteral(literal)}, 114)';
+  }
+
+  String _formatDateTimeLiteral(dynamic value, int precision) {
+    if (value is! DateTime) {
+      throw tds.DataError(
+        'Valor DATETIME2 inválido: ${value.runtimeType}',
+      );
+    }
+    final local = value.toLocal();
+    final literal = _buildDateTimeLiteral(local, precision);
+    return 'CONVERT(DATETIME2($precision), N${_escapeUnicodeLiteral(literal)}, 126)';
+  }
+
+  String _buildDateTimeLiteral(DateTime value, int precision) {
+    final buffer = StringBuffer()
+      ..write(_fourDigits(value.year))
+      ..write('-')
+      ..write(_twoDigits(value.month))
+      ..write('-')
+      ..write(_twoDigits(value.day))
+      ..write('T')
+      ..write(_twoDigits(value.hour))
+      ..write(':')
+      ..write(_twoDigits(value.minute))
+      ..write(':')
+      ..write(_twoDigits(value.second));
+    if (precision > 0) {
+      final fraction = _formatFraction(value.microsecond, precision);
+      if (fraction.isNotEmpty) {
+        buffer
+          ..write('.')
+          ..write(fraction);
+      }
+    }
+    return buffer.toString();
+  }
+
+  String _buildTimeLiteral(DateTime value, int precision) {
+    final buffer = StringBuffer()
+      ..write(_twoDigits(value.hour))
+      ..write(':')
+      ..write(_twoDigits(value.minute))
+      ..write(':')
+      ..write(_twoDigits(value.second));
+    if (precision > 0) {
+      final fraction = _formatFraction(value.microsecond, precision);
+      if (fraction.isNotEmpty) {
+        buffer
+          ..write('.')
+          ..write(fraction);
+      }
+    }
+    return buffer.toString();
+  }
+
+  String _formatFraction(int microseconds, int precision) {
+    if (precision <= 0) {
+      return '';
+    }
+    final normalizedPrecision = precision.clamp(0, 7).toInt();
+    final full = microseconds.toString().padLeft(6, '0');
+    if (normalizedPrecision <= 6) {
+      return full.substring(0, normalizedPrecision);
+    }
+    final extra = normalizedPrecision - 6;
+    return full + ''.padRight(extra, '0');
+  }
+
+  String _coerceString(dynamic value) {
+    if (value is String) {
+      return value;
+    }
+    if (value is List<int>) {
+      return String.fromCharCodes(value);
+    }
+    return '$value';
+  }
+
+  String _escapeUnicodeLiteral(String value) {
+    final escaped = value.replaceAll("'", "''");
+    return "'$escaped'";
+  }
+
+  String _twoDigits(int value) => value.toString().padLeft(2, '0');
+
+  String _fourDigits(int value) => value.toString().padLeft(4, '0');
 
   int _decodeLittleEndianInt(List<int> bytes) {
     var result = 0;
@@ -1536,6 +2207,12 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
             const <String>[]);
     _rowConvertor = _rowStrategy(names);
     _rowConvertor(const <dynamic>[]);
+  }
+
+  bool _isDoneToken(int marker) {
+    return marker == tds.TDS_DONE_TOKEN ||
+        marker == tds.TDS_DONEPROC_TOKEN ||
+        marker == tds.TDS_DONEINPROC_TOKEN;
   }
 
   int _nextTokenId() {

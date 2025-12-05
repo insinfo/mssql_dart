@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'collate.dart';
+import 'cursor.dart';
 import 'row_strategies.dart';
 import 'session_link.dart';
 import 'tds_base.dart' as tds;
@@ -242,6 +243,16 @@ class TdsSocket {
   SessionLink get mainSession => _mainSession;
   bool get isConnected => _isConnected;
   bool get marsEnabled => _marsEnabled;
+
+  TdsCursor cursor() {
+    final session = _mainSession;
+    if (session is! TdsSession) {
+      throw tds.InterfaceError(
+        'Cursor síncrono disponível apenas quando a sessão real é TdsSession.',
+      );
+    }
+    return TdsCursor(session);
+  }
 
   tds.Route? login() {
     if (_isConnected) {

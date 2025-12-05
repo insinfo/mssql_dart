@@ -16,6 +16,10 @@ import 'transport_tls.dart';
 
 const int _clientLibraryVersion = 0x01000000;
 const String _defaultInstanceName = 'MSSQLServer';
+const int _tmBeginXact = 5;
+const int _tmCommitXact = 7;
+const int _tmRollbackXact = 8;
+const int _tmFlagChain = 1;
 
 final AsyncSessionBuilder defaultAsyncSessionBuilder =
   (context) => AsyncTdsSession.fromContext(context);
@@ -107,6 +111,7 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
   bool _hasStatus = false;
   bool _inCancel = false;
   bool _moreRows = false;
+  int _transactionId = 0;
   Collation? _collation;
   tds.Results? _results;
   List<dynamic> _currentRow = const <dynamic>[];
@@ -548,6 +553,37 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
     return _sendCancel();
   }
 
+  @override
+  Future<void> beginTransaction({int? isolationLevel}) async {
+    final level = isolationLevel ?? _env.isolationLevel;
+    await _submitBeginTransaction(level);
+    await processSimpleRequest();
+  }
+
+  @override
+  Future<void> commitTransaction({bool startNew = false}) async {
+    if (_env.autocommit || _transactionId == 0) {
+      return;
+    }
+    await _submitCommitTransaction(
+      startNew: startNew,
+      isolationLevel: _env.isolationLevel,
+    );
+    await processSimpleRequest();
+  }
+
+  @override
+  Future<void> rollbackTransaction({bool startNew = false}) async {
+    if (_env.autocommit || _transactionId == 0) {
+      return;
+    }
+    await _submitRollbackTransaction(
+      startNew: startNew,
+      isolationLevel: _env.isolationLevel,
+    );
+    await processSimpleRequest();
+  }
+
   Future<void> _drainUntilDone() async {
     while (true) {
       final marker = await _nextTokenId();
@@ -759,6 +795,7 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
           await _reader.readBytes(oldSize);
         }
         if (txnValue != null) {
+          _transactionId = txnValue;
           _onTransactionStateChange?.call(txnValue);
           traceData['new'] = txnValue;
         }
@@ -773,6 +810,7 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
         if (oldTxSize > 0) {
           await _reader.readBytes(oldTxSize);
         }
+        _transactionId = 0;
         _onTransactionStateChange?.call(0);
         traceData['new'] = 0;
         break;
@@ -923,6 +961,19 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
 
   /// Limpa o buffer de linhas sem retorná-las.
   void clearRowBuffer() => _rowBuffer.clear();
+
+  void _resetResultsState({bool clearRowBuffer = false}) {
+    if (clearRowBuffer) {
+      _rowBuffer.clear();
+    }
+    _results = null;
+    _currentRow = const <dynamic>[];
+    _rowsAffected = tds.TDS_NO_COUNT;
+    _moreRows = false;
+    _skippedToStatus = false;
+    _hasStatus = false;
+    _returnStatus = null;
+  }
 
   Future<dynamic> _readColumnValueAsync(tds.Column column) async {
     final typeInfo = column.serializer;
@@ -1524,12 +1575,116 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
     _setRowStrategy(strategy);
   }
 
+  Future<void> _submitBeginTransaction(int isolationLevel) async {
+    if (_state != tds.TDS_IDLE) {
+      throw tds.InterfaceError(
+        'Já existe uma operação pendente na sessão atual.',
+      );
+    }
+    if (!tds.isTds72Plus(this)) {
+      await submitPlainQuery('BEGIN TRANSACTION');
+      _transactionId = 1;
+      _onTransactionStateChange?.call(_transactionId);
+      return;
+    }
+    _resetResultsState(clearRowBuffer: true);
+    _messages.clear();
+    _writer.beginPacket(tds.PacketType.TRANS);
+    await _startQuery();
+    final payload = ByteData(4)
+      ..setUint16(0, _tmBeginXact, Endian.little)
+      ..setUint8(2, isolationLevel)
+      ..setUint8(3, 0);
+    await _writer.write(payload.buffer.asUint8List());
+    await _writer.flush();
+    _state = tds.TDS_PENDING;
+    _trace('tran.begin', {'isolation': isolationLevel});
+  }
+
+  Future<void> _submitCommitTransaction({
+    required bool startNew,
+    required int isolationLevel,
+  }) async {
+    if (_state != tds.TDS_IDLE) {
+      throw tds.InterfaceError(
+        'Já existe uma operação pendente na sessão atual.',
+      );
+    }
+    if (!tds.isTds72Plus(this)) {
+      final sql = startNew
+          ? 'IF @@TRANCOUNT > 0 COMMIT BEGIN TRANSACTION'
+          : 'IF @@TRANCOUNT > 0 COMMIT';
+      await submitPlainQuery(sql);
+      _transactionId = startNew ? 1 : 0;
+      _onTransactionStateChange?.call(_transactionId);
+      return;
+    }
+    _resetResultsState(clearRowBuffer: true);
+    _messages.clear();
+    _writer.beginPacket(tds.PacketType.TRANS);
+    await _startQuery();
+    final flags = startNew ? _tmFlagChain : 0;
+    final payload = ByteData(4)
+      ..setUint16(0, _tmCommitXact, Endian.little)
+      ..setUint8(2, 0)
+      ..setUint8(3, flags);
+    await _writer.write(payload.buffer.asUint8List());
+    if (startNew) {
+      final continuation = ByteData(2)
+        ..setUint8(0, isolationLevel)
+        ..setUint8(1, 0);
+      await _writer.write(continuation.buffer.asUint8List());
+    }
+    await _writer.flush();
+    _state = tds.TDS_PENDING;
+    _trace('tran.commit', {'chain': startNew, 'flags': flags});
+  }
+
+  Future<void> _submitRollbackTransaction({
+    required bool startNew,
+    required int isolationLevel,
+  }) async {
+    if (_state != tds.TDS_IDLE) {
+      throw tds.InterfaceError(
+        'Já existe uma operação pendente na sessão atual.',
+      );
+    }
+    if (!tds.isTds72Plus(this)) {
+      final sql = startNew
+          ? 'IF @@TRANCOUNT > 0 ROLLBACK BEGIN TRANSACTION'
+          : 'IF @@TRANCOUNT > 0 ROLLBACK';
+      await submitPlainQuery(sql);
+      _transactionId = startNew ? 1 : 0;
+      _onTransactionStateChange?.call(_transactionId);
+      return;
+    }
+    _resetResultsState(clearRowBuffer: true);
+    _messages.clear();
+    _writer.beginPacket(tds.PacketType.TRANS);
+    await _startQuery();
+    final flags = startNew ? _tmFlagChain : 0;
+    final payload = ByteData(4)
+      ..setUint16(0, _tmRollbackXact, Endian.little)
+      ..setUint8(2, 0)
+      ..setUint8(3, flags);
+    await _writer.write(payload.buffer.asUint8List());
+    if (startNew) {
+      final continuation = ByteData(2)
+        ..setUint8(0, isolationLevel)
+        ..setUint8(1, 0);
+      await _writer.write(continuation.buffer.asUint8List());
+    }
+    await _writer.flush();
+    _state = tds.TDS_PENDING;
+    _trace('tran.rollback', {'chain': startNew, 'flags': flags});
+  }
+
   Future<void> _startQuery() async {
     final data = ByteData(22)
       ..setUint32(0, 0x16, Endian.little)
       ..setUint32(4, 0x12, Endian.little)
       ..setUint16(8, 2, Endian.little)
-      ..setUint64(10, 0, Endian.little)
+      ..setUint64(10, _transactionId, Endian.little)
       ..setUint32(18, 1, Endian.little);
     await _writer.write(data.buffer.asUint8List());
     _trace('query.start', {'tran': _env.isolationLevel});

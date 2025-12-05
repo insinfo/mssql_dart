@@ -102,6 +102,9 @@ abstract class SessionLink extends tds.TdsSessionContract {
   dynamic takeRow();
   List<dynamic> takeAllRows();
   void clearRowBuffer();
+  void beginTransaction({int? isolationLevel});
+  void commitTransaction({bool startNew = false});
+  void rollbackTransaction({bool startNew = false});
   void updateTypeSystem(
     SerializerFactory factory, {
     Collation? collation,
@@ -133,6 +136,9 @@ abstract class AsyncSessionLink extends tds.TdsSessionContract {
   dynamic takeRow();
   List<dynamic> takeAllRows();
   void clearRowBuffer();
+  Future<void> beginTransaction({int? isolationLevel});
+  Future<void> commitTransaction({bool startNew = false});
+  Future<void> rollbackTransaction({bool startNew = false});
   void updateTypeSystem(
     SerializerFactory factory, {
     Collation? collation,

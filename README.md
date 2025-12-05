@@ -19,10 +19,75 @@ Assim que uma dessas frentes estiver disponível, removeremos essa limitação e
 
 # Example Usage
 
-Demo code to perform Raw SQL queries
+### Synchronous DB-API
+
+Demo code to perform raw SQL queries using the higher-level cursor.
 
 ```dart
+import 'package:mssql_dart/mssql_dart.dart';
 
+void main() {
+	final conn = dbConnectSync(
+		host: 'localhost',
+		port: 1433,
+		user: 'sa',
+		password: 'P@ssw0rd',
+		database: 'master',
+	);
+
+	final cursor = conn.cursor();
+	cursor.execute(
+		'SELECT name FROM sys.databases WHERE database_id = @p0 AND name = @db',
+		params: [1],
+		namedParams: {'db': 'master'},
+	);
+
+	final row = cursor.fetchone();
+	print(row);
+
+	cursor.close();
+	conn.close();
+}
+```
+
+Positional collections map to `@p0`, `@p1`, ... placeholders, while entries in
+`namedParams` expect the full placeholder name you used inside the SQL batch
+(`@db` in the example).
+
+### Async Session
+
+The async socket/session API is lower-level but now exposes the same
+transaction helpers. After `connectAsync` + `login`, you can submit batches and
+drain the result buffer:
+
+```dart
+import 'package:mssql_dart/mssql_dart.dart';
+
+Future<void> main() async {
+	final socket = await connectAsync(
+		host: 'localhost',
+		port: 1433,
+		user: 'sa',
+		password: 'P@ssw0rd',
+		database: 'master',
+		encrypt: true,
+	);
+
+	await socket.login();
+	final session = socket.mainSession;
+
+	await session.beginTransaction();
+	await session.submitPlainQuery(
+		'SELECT TOP (1) name FROM sys.databases ORDER BY name ASC',
+	);
+	await session.processSimpleRequest();
+
+	final rows = socket.takeAllRows();
+	print(rows);
+
+	await session.commitTransaction();
+	await socket.close();
+}
 ```
 
 
