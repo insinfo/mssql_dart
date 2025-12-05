@@ -56,9 +56,9 @@ Positional collections map to `@p0`, `@p1`, ... placeholders, while entries in
 
 ### Async Session
 
-The async socket/session API is lower-level but now exposes the same
-transaction helpers. After `connectAsync` + `login`, you can submit batches and
-drain the result buffer:
+The async socket/session API é de baixo nível, então encapsule as operações em
+`socket.runSerial` para garantir que apenas um comando TDS esteja ativo por vez
+(semelhante ao `_operationLock` do `postgresql-dart`).
 
 ```dart
 import 'package:mssql_dart/mssql_dart.dart';
@@ -74,18 +74,17 @@ Future<void> main() async {
 	);
 
 	await socket.login();
-	final session = socket.mainSession;
 
-	await session.beginTransaction();
-	await session.submitPlainQuery(
-		'SELECT TOP (1) name FROM sys.databases ORDER BY name ASC',
-	);
-	await session.processSimpleRequest();
-
-	final rows = socket.takeAllRows();
-	print(rows);
-
-	await session.commitTransaction();
+	await socket.runSerial((session) async {
+		await session.beginTransaction();
+		await session.submitPlainQuery(
+			'SELECT TOP (1) name FROM sys.databases ORDER BY name ASC',
+		);
+		await session.processSimpleRequest();
+		final rows = socket.takeAllRows();
+		print(rows);
+		await session.commitTransaction();
+	});
 	await socket.close();
 }
 ```

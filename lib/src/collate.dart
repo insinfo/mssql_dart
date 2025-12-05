@@ -1,9 +1,9 @@
 import 'dart:convert';
 
 import 'package:galileo_utf/galileo_utf.dart' as gal_utf;
-import 'package:mssql_dart/third_party/enough_convert/big5.dart'
+import 'package:mssql_dart/third_party/charset/big5.dart'
   as conv_big5;
-import 'package:mssql_dart/third_party/fl_charset/fl_charset.dart' as char;
+import 'package:mssql_dart/third_party/charset/other/other_charset.dart' as char;
 
 const int TDS_CHARSET_ISO_8859_1 = 1;
 const int TDS_CHARSET_CP1251 = 2;

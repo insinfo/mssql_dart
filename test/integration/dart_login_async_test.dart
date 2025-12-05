@@ -48,9 +48,11 @@ void main() {
     );
     addTearDown(() => socket.close());
 
-    await socket.mainSession
+    await socket.runSerial((session) async {
+      await session
         .submitPlainQuery('SELECT 10 AS valor UNION ALL SELECT 20');
-    await socket.mainSession.processSimpleRequest();
+      await session.processSimpleRequest();
+    });
 
     expect(socket.hasBufferedRows, isTrue);
     expect(socket.bufferedRowCount, equals(2));

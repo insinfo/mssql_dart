@@ -121,10 +121,21 @@ class AsyncTdsSocket {
     _isConnected = true;
     if (_login.database.isNotEmpty && env.database != _login.database) {
       final sql = 'use ' + tds.tdsQuoteId(_login.database);
-      await _mainSession.submitPlainQuery(sql);
-      await _mainSession.processSimpleRequest();
+      await runSerial((session) async {
+        await session.submitPlainQuery(sql);
+        await session.processSimpleRequest();
+      });
     }
     return route;
+  }
+  /// Serializa o uso do [_mainSession], garantindo que apenas uma operação
+  /// TDS seja executada por vez (importante para o modo assíncrono).
+  Future<T> runSerial<T>(Future<T> Function(AsyncSessionLink session) action) {
+    final session = _mainSession;
+    if (session is AsyncTdsSession) {
+      return session.runSerial(() => action(session));
+    }
+    return action(session);
   }
 
   Future<void> close() async {

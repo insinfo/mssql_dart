@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:math' as math;
@@ -5,6 +6,7 @@ import 'dart:typed_data';
 
 import 'package:meta/meta.dart';
 
+import 'async_operation_lock.dart';
 import 'collate.dart';
 import 'row_strategies.dart';
 import 'session_link.dart';
@@ -116,6 +118,7 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
   tds.Results? _results;
   List<dynamic> _currentRow = const <dynamic>[];
   bool _skippedToStatus = false;
+  final AsyncOperationLock _operationLock = AsyncOperationLock();
 
   void _trace(String event, [Map<String, Object?>? data]) {
     final hook = _traceHook;
@@ -142,6 +145,16 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
   String? get lastQuery => _lastQuery;
   tds.TdsEnv get env => _env;
   List<tds.Message> get messages => _messages;
+
+  /// Executa [action] garantindo exclusividade no canal TDS.
+  ///
+  /// Similar ao `_operationLock` do `postgresql-dart`, evita que duas
+  /// operações assíncronas utilizem o mesmo socket simultaneamente. Útil para
+  /// envolver sequências `submitPlainQuery` + `processSimpleRequest` sob um
+  /// único lock.
+  Future<T> runSerial<T>(Future<T> Function() action) {
+    return _operationLock.synchronized(action);
+  }
 
   @override
   tds.AsyncTransportProtocol get transport => _transport;
