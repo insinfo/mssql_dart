@@ -7,6 +7,7 @@ import codecs
 import collections.abc
 import contextlib
 import datetime
+import os
 import struct
 import typing
 import warnings
@@ -36,6 +37,33 @@ from pytds.row_strategies import list_row_strategy, RowStrategy, RowGenerator
 
 if typing.TYPE_CHECKING:
     from pytds.tds_socket import _TdsSocket
+
+
+_TRACE_ENABLED = os.getenv("PYTDS_TRACE_EVENTS", "").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+    "debug",
+}
+
+
+def _trace(event: str, **fields: Any) -> None:
+    if not _TRACE_ENABLED:
+        return
+    payload = " ".join(f"{key}={value}" for key, value in fields.items())
+    print(f"[PYTDS-TRACE] {event} {payload}".strip())
+
+
+def _sql_snippet(sql: str, limit: int = 200) -> str:
+    sql = " ".join(sql.split())
+    if len(sql) <= limit:
+        return sql
+    return f"{sql[: limit - 3]}..."
+
+
+def _token_name(marker: int) -> str:
+    return _TOKEN_NAMES.get(marker, f"0x{marker:02x}")
 
 
 class _TdsSession:
@@ -92,6 +120,11 @@ class _TdsSession:
         self._row_strategy = row_strategy
         self._env = env
         self._row_convertor: RowGenerator = list
+        _trace(
+            "session.init",
+            bufsize=bufsize,
+            row_strategy=getattr(row_strategy, "__name__", row_strategy.__class__.__name__),
+        )
 
     @property
     def autocommit(self):
@@ -246,6 +279,11 @@ class _TdsSession:
             )
         info.description = tuple(header_tuple)
         self._setup_row_factory()
+        _trace(
+            "result.columns",
+            count=num_cols,
+            names=[col.column_name for col in info.columns],
+        )
         return info
 
     def process_param(self):
@@ -268,6 +306,12 @@ class _TdsSession:
         self.get_type_info(param)
         param.value = param.serializer.read(r)
         self.output_params[ordinal] = param
+        _trace(
+            "rpc.returnvalue",
+            ordinal=ordinal,
+            name=name,
+            type=getattr(param.serializer, "type", None),
+        )
         self.return_value_index += 1
 
     def process_cancel(self):
@@ -334,6 +378,15 @@ class _TdsSession:
 
         # special case
         self.messages.append(msg)
+        _trace(
+            "message",
+            marker=_token_name(marker),
+            msgno=msg["msgno"],
+            severity=msg["severity"],
+            state=msg["state"],
+            line=msg["line_number"],
+            text=_sql_snippet(msg["message"], 160),
+        )
 
     def process_row(self):
         """Reads and handles ROW stream.
@@ -347,6 +400,7 @@ class _TdsSession:
         info.row_count += 1
         for i, curcol in enumerate(info.columns):
             curcol.value = self.row[i] = curcol.serializer.read(r)
+        _trace("row", values=list(self.row))
 
     def process_nbcrow(self):
         """Reads and handles NBCROW stream.
@@ -372,6 +426,7 @@ class _TdsSession:
             else:
                 value = curcol.serializer.read(r)
             self.row[i] = value
+        _trace("nbcrow", values=list(self.row))
 
     def process_orderby(self):
         """Reads and processes ORDER stream
@@ -422,6 +477,15 @@ class _TdsSession:
         else:
             self.rows_affected = -1
         self.done_flags = status
+        _trace(
+            "done",
+            marker=code_to_str[marker],
+            status=status,
+            rows=self.rows_affected,
+            more=more_results,
+            cancelled=was_cancelled,
+            count_valid=done_count_valid,
+        )
         if (
             self.done_flags & tds_base.TDS_DONE_ERROR
             and not was_cancelled
@@ -442,6 +506,7 @@ class _TdsSession:
         r = self._reader
         size = r.get_smallint()
         type_id = r.get_byte()
+        trace_payload: dict[str, Any] = {"type": type_id}
         if type_id == tds_base.TDS_ENV_SQLCOLLATION:
             size = r.get_byte()
             self.conn.collation = r.get_collation()
@@ -449,12 +514,14 @@ class _TdsSession:
             skipall(r, size - 5)
             # discard old one
             skipall(r, r.get_byte())
+            trace_payload["new"] = str(self.conn.collation)
         elif type_id == tds_base.TDS_ENV_BEGINTRANS:
             size = r.get_byte()
             assert size == 8
             self.conn.tds72_transaction = r.get_uint8()
             # old val, should be 0
             skipall(r, r.get_byte())
+            trace_payload["new"] = self.conn.tds72_transaction
         elif (
             type_id == tds_base.TDS_ENV_COMMITTRANS
             or type_id == tds_base.TDS_ENV_ROLLBACKTRANS
@@ -464,6 +531,7 @@ class _TdsSession:
             skipall(r, r.get_byte())
             # old val, should have previous transaction id
             skipall(r, r.get_byte())
+            trace_payload["new"] = 0
         elif type_id == tds_base.TDS_ENV_PACKSIZE:
             newval = r.read_ucs2(r.get_byte())
             r.read_ucs2(r.get_byte())
@@ -474,16 +542,19 @@ class _TdsSession:
                 #
                 # Reallocate buffer if possible (strange values from server or out of memory) use older buffer */
                 self._writer.bufsize = new_block_size
+            trace_payload["new"] = new_block_size
         elif type_id == tds_base.TDS_ENV_DATABASE:
             newval = r.read_ucs2(r.get_byte())
             logger.info("switched to database %s", newval)
             r.read_ucs2(r.get_byte())
             self.conn.env.database = newval
+            trace_payload["new"] = newval
         elif type_id == tds_base.TDS_ENV_LANG:
             newval = r.read_ucs2(r.get_byte())
             logger.info("switched language to %s", newval)
             r.read_ucs2(r.get_byte())
             self.conn.env.language = newval
+            trace_payload["new"] = newval
         elif type_id == tds_base.TDS_ENV_CHARSET:
             newval = r.read_ucs2(r.get_byte())
             logger.info("switched charset to %s", newval)
@@ -491,19 +562,23 @@ class _TdsSession:
             self.conn.env.charset = newval
             remap = {"iso_1": "iso8859-1"}
             self.conn.server_codec = codecs.lookup(remap.get(newval, newval))
+            trace_payload["new"] = newval
         elif type_id == tds_base.TDS_ENV_DB_MIRRORING_PARTNER:
             newval = r.read_ucs2(r.get_byte())
             logger.info("got mirroring partner %s", newval)
             r.read_ucs2(r.get_byte())
+            trace_payload["new"] = newval
         elif type_id == tds_base.TDS_ENV_LCID:
             lcid = int(r.read_ucs2(r.get_byte()))
             logger.info("switched lcid to %s", lcid)
             self.conn.server_codec = codecs.lookup(lcid2charset(lcid))
             r.read_ucs2(r.get_byte())
+            trace_payload["new"] = lcid
         elif type_id == tds_base.TDS_ENV_UNICODE_DATA_SORT_COMP_FLAGS:
             r.read_ucs2(r.get_byte())
             comp_flags = r.read_ucs2(r.get_byte())
             self.conn.comp_flags = comp_flags
+            trace_payload["new"] = comp_flags
         elif type_id == 20:
             # routing
             r.get_usmallint()
@@ -520,12 +595,15 @@ class _TdsSession:
                 "server": alt_server,
                 "port": protocol_property,
             }
+            trace_payload.update(server=alt_server, port=protocol_property)
             # OLDVALUE = 0x00, 0x00
             r.get_usmallint()
         else:
             logger.warning("unknown env type: %d, skipping", type_id)
             # discard byte values, not still supported
             skipall(r, size - 1)
+            trace_payload["unknown"] = True
+        _trace("envchange", **trace_payload)
 
     def process_auth(self) -> None:
         """Reads and processes SSPI stream.
@@ -535,12 +613,14 @@ class _TdsSession:
         r = self._reader
         w = self._writer
         pdu_size = r.get_smallint()
+        _trace("auth.challenge", size=pdu_size)
         if not self.authentication:
             raise tds_base.Error("Got unexpected token")
         packet = self.authentication.handle_next(readall(r, pdu_size))
         if packet:
             w.write(packet)
             w.flush()
+            _trace("auth.response", size=len(packet))
 
     def is_connected(self) -> bool:
         """
@@ -750,6 +830,12 @@ class _TdsSession:
         :param flags: See spec for possible flags.
         """
         logger.info("Sending RPC %s flags=%d", rpc_name, flags)
+        _trace(
+            "rpc.submit",
+            name=rpc_name if isinstance(rpc_name, str) else getattr(rpc_name, "name", rpc_name),
+            flags=flags,
+            params=len(params),
+        )
         self.messages = []
         self.output_params = {}
         self.cancel_if_pending()
@@ -958,6 +1044,11 @@ class _TdsSession:
         self.cancel_if_pending()
         self.res_info = None
         logger.info("Sending query %s", operation[:100])
+        _trace(
+            "query.submit",
+            sql=_sql_snippet(operation),
+            length=len(operation),
+        )
         w = self._writer
         with self.querying_context(tds_base.PacketType.QUERY):
             if tds_base.IS_TDS72_PLUS(self):
@@ -1158,6 +1249,7 @@ class _TdsSession:
 
     def _start_query(self) -> None:
         w = self._writer
+        _trace("query.start", tran=self.conn.tds72_transaction)
         w.pack(
             _TdsSession._tds72_query_start,
             0x16,  # total length
@@ -1245,6 +1337,11 @@ class _TdsSession:
             # MARS (1 enabled)
             w.put_byte(1 if login.use_mars else 0)
             attribs["mars"] = login.use_mars
+        _trace(
+            "prelogin.send",
+            tds_version=f"{login.tds_version:x}",
+            **attribs,
+        )
         logger.info(
             "Sending PRELOGIN %s", " ".join(f"{n}={v!r}" for n, v in attribs.items())
         )
@@ -1315,6 +1412,17 @@ class _TdsSession:
             "Got PRELOGIN response crypt=%x mars=%d",
             crypt_flag,
             self.conn._mars_enabled,
+        )
+        server_lib = (
+            ":".join(f"{part:x}" for part in self.conn.server_library_version)
+            if self.conn.server_library_version
+            else None
+        )
+        _trace(
+            "prelogin.response",
+            crypt_flag=crypt_flag,
+            mars_enabled=self.conn._mars_enabled,
+            server_lib=server_lib,
         )
         # if server do not has certificate do normal login
         login.server_enc_flag = crypt_flag
@@ -1445,6 +1553,15 @@ class _TdsSession:
             login.language,
             login.database,
         )
+        _trace(
+            "login.send",
+            user=login.user_name or "",
+            database=login.database or "",
+            app=login.app_name or "",
+            tds_version=f"{login.tds_version:x}",
+            packet_size=packet_size,
+            auth=bool(self.authentication),
+        )
         w.put_int(mins_fix)
         w.put_int(login.client_lcid)
         w.put_smallint(current_pos)
@@ -1561,6 +1678,12 @@ class _TdsSession:
                     self.conn.product_name,
                     product_version,
                 )
+                _trace(
+                    "login.ack",
+                    tds_version=f"{self.conn.tds_version:x}",
+                    product=self.conn.product_name,
+                    product_version=f"{product_version:x}",
+                )
                 # MSSQL 6.5 and 7.0 seem to return strange values for this
                 # using TDS 4.2, something like 5F 06 32 FF for 6.50
                 self.conn.product_version = product_version
@@ -1577,8 +1700,10 @@ class _TdsSession:
         self.log_response_message("got RETURNSTATUS message")
         self.ret_status = self._reader.get_int()
         self.has_status = True
+        _trace("returnstatus", value=self.ret_status)
 
     def process_token(self, marker: int) -> Any:
+        _trace("token", marker=f"0x{marker:02x}", name=_token_name(marker))
         handler = _token_map.get(marker)
         if not handler:
             self.bad_stream(f"Invalid TDS marker: {marker}({marker:x})")
@@ -1737,6 +1862,26 @@ class _TdsSession:
         r = self._reader
         total_length = r.get_smallint()
         tds_base.skipall(r, total_length)
+
+
+_TOKEN_NAMES = {
+    tds_base.TDS_AUTH_TOKEN: "AUTH",
+    tds_base.TDS_ENVCHANGE_TOKEN: "ENVCHANGE",
+    tds_base.TDS_DONE_TOKEN: "DONE",
+    tds_base.TDS_DONEPROC_TOKEN: "DONEPROC",
+    tds_base.TDS_DONEINPROC_TOKEN: "DONEINPROC",
+    tds_base.TDS_ERROR_TOKEN: "ERROR",
+    tds_base.TDS_INFO_TOKEN: "INFO",
+    tds_base.TDS_CAPABILITY_TOKEN: "CAPABILITY",
+    tds_base.TDS_PARAM_TOKEN: "RETURNVALUE",
+    tds_base.TDS7_RESULT_TOKEN: "COLMETADATA",
+    tds_base.TDS_ROW_TOKEN: "ROW",
+    tds_base.TDS_NBC_ROW_TOKEN: "NBCROW",
+    tds_base.TDS_ORDERBY_TOKEN: "ORDERBY",
+    tds_base.TDS_RETURNSTATUS_TOKEN: "RETURNSTATUS",
+    tds_base.TDS_TABNAME_TOKEN: "TABNAME",
+    tds_base.TDS_COLINFO_TOKEN: "COLINFO",
+}
 
 
 _token_map = {

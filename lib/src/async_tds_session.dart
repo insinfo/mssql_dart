@@ -1,7 +1,9 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'async_socket_transport.dart';
 import 'collate.dart';
 import 'row_strategies.dart';
 import 'session_link.dart';
@@ -13,14 +15,12 @@ import 'tds_types.dart';
 const int _clientLibraryVersion = 0x01000000;
 const String _defaultInstanceName = 'MSSQLServer';
 
-/// Builder padrão usado enquanto o restante do port não disponibiliza uma
-/// sessão completa.
-final SessionBuilder defaultSessionBuilder =
-    (context) => TdsSession.fromContext(context);
+final AsyncSessionBuilder defaultAsyncSessionBuilder =
+  (context) => AsyncTdsSession.fromContext(context);
 
-class TdsSession implements SessionLink, tds.TdsSessionContract {
-  TdsSession({
-    required tds.TransportProtocol transport,
+class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
+  AsyncTdsSession({
+    required tds.AsyncTransportProtocol transport,
     required tds.TdsEnv env,
     required int bufsize,
     this.tzinfoFactory,
@@ -45,20 +45,20 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
         _traceHook = traceHook {
     _setRowStrategy(rowStrategy ?? defaultRowStrategy);
     _collation = initialCollation;
-    _reader = TdsReader(
+    _reader = AsyncTdsReader(
       transport: transport,
       session: this,
       bufsize: bufsize,
     );
-    _writer = TdsWriter(
+    _writer = AsyncTdsWriter(
       transport: transport,
       session: this,
       bufsize: bufsize,
     );
   }
 
-  factory TdsSession.fromContext(SessionBuildContext context) {
-    return TdsSession(
+  factory AsyncTdsSession.fromContext(AsyncSessionBuildContext context) {
+    return AsyncTdsSession(
       transport: context.transport,
       env: context.env,
       bufsize: context.bufsize,
@@ -75,10 +75,10 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     );
   }
 
-  final tds.TransportProtocol _transport;
+  final tds.AsyncTransportProtocol _transport;
   final tds.TdsEnv _env;
-  late final TdsReader _reader;
-  late final TdsWriter _writer;
+  late final AsyncTdsReader _reader;
+  late final AsyncTdsWriter _writer;
   final TzInfoFactory? tzinfoFactory;
   late RowStrategy _rowStrategy;
   late RowGenerator _rowConvertor;
@@ -106,22 +106,18 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
   tds.Results? _results;
   List<dynamic> _currentRow = const <dynamic>[];
   bool _skippedToStatus = false;
+
   void _trace(String event, [Map<String, Object?>? data]) {
     final hook = _traceHook;
     if (hook == null) {
       return;
     }
-    if (data == null || data.isEmpty) {
-      hook(event, const {});
-      return;
-    }
-    hook(event, Map.unmodifiable(data));
+    hook(event, data == null ? const {} : Map.unmodifiable(data));
   }
 
   SerializerFactory get typeFactory => _typeFactory;
   Collation? get connectionCollation => _connectionCollation;
   bool get bytesToUnicode => _bytesToUnicode;
-
   int get rowsAffected => _rowsAffected;
   int? get returnStatus => _returnStatus;
   bool get hasReturnStatus => _hasStatus;
@@ -131,14 +127,12 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
   tds.Results? get results => _results;
   List<dynamic> get currentRow => _currentRow;
   bool get skippedToStatus => _skippedToStatus;
-
   String? get lastQuery => _lastQuery;
-
   tds.TdsEnv get env => _env;
   List<tds.Message> get messages => _messages;
 
   @override
-  tds.TransportProtocol get transport => _transport;
+  tds.AsyncTransportProtocol get transport => _transport;
 
   @override
   int get writerBufferSize => _writer.bufsize;
@@ -147,12 +141,10 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
   int get readerBlockSize => _reader.blockSize;
 
   @override
-  void setReaderBlockSize(int size) {
-    _reader.setBlockSize(size);
-  }
+  void setReaderBlockSize(int size) => _reader.setBlockSize(size);
 
   @override
-  void sendPrelogin(tds.TdsLogin login) {
+  Future<void> sendPrelogin(tds.TdsLogin login) async {
     _tdsVersion = login.tdsVersion;
     final instance =
         login.instanceName.isEmpty ? _defaultInstanceName : login.instanceName;
@@ -181,15 +173,15 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     view.setUint8(cursor, tds.PreLoginToken.TERMINATOR);
 
     _writer.beginPacket(tds.PacketType.PRELOGIN);
-    _writer.write(header);
-    _writer.putUIntBe(_clientLibraryVersion);
-    _writer.putUSmallIntBe(0); // build number
-    _writer.putByte(login.encFlag);
-    _writer.write(instanceBytes);
-    _writer.putByte(0);
-    _writer.putInt(0); // thread id placeholder
+    await _writer.write(header);
+    await _writer.putUIntBe(_clientLibraryVersion);
+    await _writer.putUSmallIntBe(0);
+    await _writer.putByte(login.encFlag);
+    await _writer.write(instanceBytes);
+    await _writer.putByte(0);
+    await _writer.putInt(0);
     if (tds.isTds72Plus(this)) {
-      _writer.putByte(login.useMars ? 1 : 0);
+      await _writer.putByte(login.useMars ? 1 : 0);
     }
     _trace('prelogin.send', {
       'tds_version': '0x${login.tdsVersion.toRadixString(16)}',
@@ -197,23 +189,23 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
       'instance': instance,
       'mars': login.useMars,
     });
-    _writer.flush();
+    await _writer.flush();
     _state = tds.TDS_PENDING;
   }
 
   @override
-  void processPrelogin(tds.TdsLogin login) {
-    final resp = beginResponse();
-    final payload = _reader.readWholePacket();
+  Future<void> processPrelogin(tds.TdsLogin login) async {
+    final resp = await beginResponse();
+    final payload = await _reader.readWholePacket();
     if (resp.type != tds.PacketType.REPLY) {
       _badStream(
         'Tipo de pacote inesperado durante PRELOGIN: ${resp.type}',
       );
     }
-    _parsePrelogin(payload, login);
+    await _parsePrelogin(payload, login);
   }
 
-  void _parsePrelogin(List<int> octets, tds.TdsLogin login) {
+  Future<void> _parsePrelogin(List<int> octets, tds.TdsLogin login) async {
     if (octets.isEmpty) {
       _badStream('Resposta PRELOGIN vazia');
     }
@@ -237,7 +229,6 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
       }
       switch (token) {
         case tds.PreLoginToken.VERSION:
-          // ignorado por enquanto
           break;
         case tds.PreLoginToken.ENCRYPTION:
           cryptFlag = data[payloadOffset];
@@ -248,24 +239,119 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
       offset += 5;
     }
     login.serverEncFlag = cryptFlag;
-    if (cryptFlag == tds.PreLoginEnc.ENCRYPT_ON ||
-        cryptFlag == tds.PreLoginEnc.ENCRYPT_REQ) {
-      throw tds.NotSupportedError(
-        'Negociação TLS ainda não foi portada (crypt=$cryptFlag).',
-      );
-    }
-    if (cryptFlag == tds.PreLoginEnc.ENCRYPT_OFF &&
-        login.encFlag == tds.PreLoginEnc.ENCRYPT_ON) {
-      _badStream('Servidor não aceitou criptografia obrigatória');
-    }
+    await _handleEncryptionNegotiation(login, cryptFlag);
     _trace('prelogin.response', {
       'crypt_flag': cryptFlag,
       'mars_requested': login.useMars,
     });
   }
 
+  Future<void> _handleEncryptionNegotiation(
+    tds.TdsLogin login,
+    int cryptFlag,
+  ) async {
+    final supportsTls = login.encFlag != tds.PreLoginEnc.ENCRYPT_NOT_SUP;
+    switch (cryptFlag) {
+      case tds.PreLoginEnc.ENCRYPT_OFF:
+        if (login.encFlag == tds.PreLoginEnc.ENCRYPT_ON) {
+          _badStream(
+            'Servidor sinalizou ENCRYPT_OFF ao mesmo tempo em que o cliente exige criptografia.',
+          );
+        }
+        if (!supportsTls) {
+          return;
+        }
+        await _establishSecureChannel(login, loginOnly: true);
+        break;
+      case tds.PreLoginEnc.ENCRYPT_ON:
+        if (!supportsTls) {
+          throw tds.OperationalError(
+            'O servidor exige criptografia TLS, mas o login atual não habilitou suporte (defina um cafile/tlsCtx e ajuste encFlag).',
+          );
+        }
+        await _establishSecureChannel(login);
+        break;
+      case tds.PreLoginEnc.ENCRYPT_REQ:
+        if (!supportsTls) {
+          throw tds.OperationalError(
+            'O servidor exige criptografia TLS, mas o login atual não habilitou suporte (defina um cafile/tlsCtx e ajuste encFlag).',
+          );
+        }
+        await _establishSecureChannel(login);
+        break;
+      case tds.PreLoginEnc.ENCRYPT_NOT_SUP:
+        if (login.encFlag == tds.PreLoginEnc.ENCRYPT_ON) {
+          throw tds.OperationalError(
+            'O servidor não suporta criptografia, mas o cliente a tornou obrigatória.',
+          );
+        }
+        break;
+      default:
+        _badStream('Valor inesperado de encrypt_flag retornado pelo servidor: $cryptFlag');
+    }
+  }
+
+  Future<void> _establishSecureChannel(
+    tds.TdsLogin login, {
+    bool loginOnly = false,
+  }) async {
+    final transport = _transport;
+    if (transport is! AsyncSocketTransport) {
+      throw tds.NotSupportedError(
+        'TLS só está disponível para AsyncSocketTransport por enquanto.',
+      );
+    }
+    final context = _resolveSecurityContext(login);
+    if (context == null) {
+      throw tds.NotSupportedError(
+        'TLS solicitado mas nenhum SecurityContext foi configurado (defina login.cafile ou login.tlsCtx).',
+      );
+    }
+    final allowBadCertificate = login.validateHost
+        ? null
+        : (X509Certificate certificate) => true;
+    final sniHost =
+        login.serverName.isNotEmpty ? login.serverName : (transport.host ?? '');
+    await transport.upgradeToSecureSocket(
+      context: context,
+      onBadCertificate: allowBadCertificate,
+      host: sniHost.isEmpty ? null : sniHost,
+    );
+    _trace('tls.established', {
+      'host': sniHost,
+      'login_only': loginOnly,
+      'cafile': login.cafile,
+      'validate_host': login.validateHost,
+    });
+  }
+
+  SecurityContext? _resolveSecurityContext(tds.TdsLogin login) {
+    final cached = login.tlsCtx;
+    if (cached is SecurityContext) {
+      return cached;
+    }
+    final cafile = login.cafile;
+    if (cafile == null || cafile.isEmpty) {
+      return null;
+    }
+    final context = SecurityContext();
+    try {
+      context.setTrustedCertificates(cafile);
+    } on TlsException catch (error) {
+      throw tds.OperationalError(
+        'Falha ao carregar certificado de confiança ($cafile): ${error.message}',
+      );
+    } on IOException catch (error) {
+      throw tds.OperationalError(
+        'Não foi possível ler o arquivo de certificados ($cafile): $error',
+      );
+    }
+    login.tlsCtx = context;
+    return context;
+  }
+
   @override
-  void sendLogin(tds.TdsLogin login) {
+  Future<void> sendLogin(tds.TdsLogin login) async {
     final isTds72Plus = tds.isTds72Plus(this);
     final userName = login.userName;
     if (userName.length > 128) {
@@ -294,82 +380,82 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     }
     final writer = _writer;
     writer.beginPacket(tds.PacketType.LOGIN);
-    writer.putInt(packetSize);
-    writer.putUInt(login.tdsVersion);
-    writer.putInt(login.blocksize);
-    writer.putUInt(_clientLibraryVersion);
-    writer.putInt(login.pid);
-    writer.putUInt(0); // connection id
+    await writer.putInt(packetSize);
+    await writer.putUInt(login.tdsVersion);
+    await writer.putInt(login.blocksize);
+    await writer.putUInt(_clientLibraryVersion);
+    await writer.putInt(login.pid);
+    await writer.putUInt(0);
     var optionFlag1 =
         tds.TDS_SET_LANG_ON | tds.TDS_USE_DB_NOTIFY | tds.TDS_INIT_DB_FATAL;
     if (!login.bulkCopy) {
       optionFlag1 |= tds.TDS_DUMPLOAD_OFF;
     }
-    writer.putByte(optionFlag1);
+    await writer.putByte(optionFlag1);
     var optionFlag2 = login.optionFlag2;
     if (_authentication != null) {
       optionFlag2 |= tds.TDS_INTEGRATED_SECURITY_ON;
     }
-    writer.putByte(optionFlag2);
+    await writer.putByte(optionFlag2);
     var typeFlags = 0;
     if (login.readonly) {
       typeFlags |= tds.TDS_FREADONLY_INTENT;
     }
-    writer.putByte(typeFlags);
-    writer.putByte(
+    await writer.putByte(typeFlags);
+    await writer.putByte(
         tds.isTds73Plus(this) ? tds.TDS_UNKNOWN_COLLATION_HANDLING : 0);
     final offsetMinutes = login.clientTz.timeZoneOffset.inMinutes;
-    writer.putInt(offsetMinutes);
-    writer.putInt(login.clientLcid);
+    await writer.putInt(offsetMinutes);
+    await writer.putInt(login.clientLcid);
 
-    void writeOffsetLen(String value) {
-      writer.putSmallInt(currentPos);
-      writer.putSmallInt(value.length);
+    Future<void> writeOffsetLen(String value) async {
+      await writer.putSmallInt(currentPos);
+      await writer.putSmallInt(value.length);
       currentPos += value.length * 2;
     }
 
-    writeOffsetLen(login.clientHostName);
+    await writeOffsetLen(login.clientHostName);
     if (_authentication != null) {
-      writer.putSmallInt(0);
-      writer.putSmallInt(0);
-      writer.putSmallInt(0);
-      writer.putSmallInt(0);
+      await writer.putSmallInt(0);
+      await writer.putSmallInt(0);
+      await writer.putSmallInt(0);
+      await writer.putSmallInt(0);
     } else {
-      writeOffsetLen(userName);
-      writeOffsetLen(login.password);
+      await writeOffsetLen(userName);
+      await writeOffsetLen(login.password);
     }
-    writeOffsetLen(login.appName);
-    writeOffsetLen(login.serverName);
-    writer.putSmallInt(0); // réserve
-    writer.putSmallInt(0);
-    writeOffsetLen(login.library);
-    writeOffsetLen(login.language);
-    writeOffsetLen(login.database);
+    await writeOffsetLen(login.appName);
+    await writeOffsetLen(login.serverName);
+    await writer.putSmallInt(0);
+    await writer.putSmallInt(0);
+    await writeOffsetLen(login.library);
+    await writeOffsetLen(login.language);
+    await writeOffsetLen(login.database);
     final clientIdBytes = ByteData(8)..setUint64(0, login.clientId, Endian.big);
-    writer.write(clientIdBytes.buffer.asUint8List(2));
-    writer.putSmallInt(currentPos);
-    writer.putSmallInt(authPacket.length);
+    await writer.write(clientIdBytes.buffer.asUint8List(2));
+    await writer.putSmallInt(currentPos);
+    await writer.putSmallInt(authPacket.length);
     currentPos += authPacket.length;
-    writeOffsetLen(login.attachDbFile);
+    await writeOffsetLen(login.attachDbFile);
     if (isTds72Plus) {
-      writeOffsetLen(login.changePassword);
-      writer.putInt(0);
+      await writeOffsetLen(login.changePassword);
+      await writer.putInt(0);
     }
-    writer.writeUcs2(login.clientHostName);
+    await writer.writeUcs2(login.clientHostName);
     if (_authentication == null) {
-      writer.writeUcs2(userName);
-      writer.write(tds.tds7CryptPass(login.password));
+      await writer.writeUcs2(userName);
+      await writer.write(tds.tds7CryptPass(login.password));
     }
-    writer.writeUcs2(login.appName);
-    writer.writeUcs2(login.serverName);
-    writer.writeUcs2(login.library);
-    writer.writeUcs2(login.language);
-    writer.writeUcs2(login.database);
+    await writer.writeUcs2(login.appName);
+    await writer.writeUcs2(login.serverName);
+    await writer.writeUcs2(login.library);
+    await writer.writeUcs2(login.language);
+    await writer.writeUcs2(login.database);
     if (_authentication != null) {
-      writer.write(authPacket);
+      await writer.write(authPacket);
     }
-    writer.writeUcs2(login.attachDbFile);
-    writer.writeUcs2(login.changePassword);
+    await writer.writeUcs2(login.attachDbFile);
+    await writer.writeUcs2(login.changePassword);
     _trace('login.send', {
       'user': userName,
       'database': login.database,
@@ -378,40 +464,40 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
       'packet_size': packetSize,
       'auth': _authentication != null,
     });
-    writer.flush();
+    await writer.flush();
     _state = tds.TDS_PENDING;
   }
 
   @override
-  ResponseMetadata beginResponse() {
+  Future<ResponseMetadata> beginResponse() async {
     try {
-      final meta = _reader.beginResponse();
+      final meta = await _reader.beginResponse();
       _state = tds.TDS_READING;
       return meta;
     } on tds.TimeoutError {
-      _sendCancel();
+      await _sendCancel();
       rethrow;
     }
   }
 
   @override
-  bool processLoginTokens() {
+  Future<bool> processLoginTokens() async {
     var succeed = false;
     while (true) {
       if (_reader.streamFinished()) {
-        beginResponse();
+        await beginResponse();
       }
-      final marker = _nextTokenId();
+      final marker = await _nextTokenId();
       if (marker == tds.TDS_LOGINACK_TOKEN) {
         succeed = true;
-        _processLoginAck();
-      } else if (_handleCommonToken(marker)) {
+        await _processLoginAck();
+      } else if (await _handleCommonToken(marker)) {
         if (marker == tds.TDS_DONE_TOKEN &&
             (_doneFlags & tds.TDS_DONE_MORE_RESULTS) == 0) {
           break;
         }
       } else {
-        _skipToken(marker);
+        await _skipToken(marker);
       }
       if (marker == tds.TDS_DONE_TOKEN &&
           (_doneFlags & tds.TDS_DONE_MORE_RESULTS) == 0) {
@@ -421,19 +507,19 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     return succeed;
   }
 
-  void _processLoginAck() {
-    var size = _reader.getSmallInt();
-    _reader.getByte(); // interface id
-    final version = _reader.getUIntBe();
+  Future<void> _processLoginAck() async {
+    var size = await _reader.getSmallInt();
+    await _reader.getByte();
+    final version = await _reader.getUIntBe();
     _tdsVersion = _serverToClientMapping[version] ?? version;
     if (!tds.isTds7Plus(this)) {
       _badStream('Versão TDS mínima suportada é 7.0');
     }
-    _reader.getByte();
+    await _reader.getByte();
     size -= 10;
     final nameChars = math.max(0, size ~/ 2);
-    _reader.readUcs2(nameChars);
-    _reader.getUIntBe();
+    await _reader.readUcs2(nameChars);
+    await _reader.getUIntBe();
     if (_authentication != null) {
       _authentication!.close();
       _authentication = null;
@@ -473,7 +559,7 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
   }
 
   @override
-  void submitPlainQuery(String sql) {
+  Future<void> submitPlainQuery(String sql) async {
     if (_state != tds.TDS_IDLE) {
       throw tds.InterfaceError(
         'Já existe uma operação pendente na sessão atual.',
@@ -484,27 +570,27 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     _lastQuery = sql;
     _writer.beginPacket(tds.PacketType.QUERY);
     if (tds.isTds72Plus(this)) {
-      _startQuery();
+      await _startQuery();
     }
     _trace('query.submit', {
       'sql': sql,
       'length': sql.length,
     });
-    _writer.writeUcs2(sql);
-    _writer.flush();
+    await _writer.writeUcs2(sql);
+    await _writer.flush();
     _state = tds.TDS_PENDING;
   }
 
   @override
-  void processSimpleRequest() {
-    beginResponse();
-    _drainUntilDone();
+  Future<void> processSimpleRequest() async {
+    await beginResponse();
+    await _drainUntilDone();
   }
 
-  void _drainUntilDone() {
+  Future<void> _drainUntilDone() async {
     while (true) {
-      final marker = _nextTokenId();
-      if (_handleCommonToken(marker)) {
+      final marker = await _nextTokenId();
+      if (await _handleCommonToken(marker)) {
         if ((marker == tds.TDS_DONE_TOKEN ||
                 marker == tds.TDS_DONEPROC_TOKEN ||
                 marker == tds.TDS_DONEINPROC_TOKEN) &&
@@ -513,54 +599,56 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
         }
         continue;
       }
-      _skipToken(marker);
+      await _skipToken(marker);
     }
   }
 
-  bool _handleCommonToken(int marker) {
+  Future<bool> _handleCommonToken(int marker) async {
     switch (marker) {
       case tds.TDS_DONE_TOKEN:
       case tds.TDS_DONEPROC_TOKEN:
       case tds.TDS_DONEINPROC_TOKEN:
-        _processDone(marker);
+        await _processDone(marker);
         return true;
       case tds.TDS_ENVCHANGE_TOKEN:
-        _processEnvChange();
+        await _processEnvChange();
         return true;
       case tds.TDS_INFO_TOKEN:
       case tds.TDS_ERROR_TOKEN:
-        _messages.add(_processMessage(marker));
+        _messages.add(await _processMessage(marker));
         return true;
       case tds.TDS_RETURNSTATUS_TOKEN:
-        _processReturnStatus();
+        await _processReturnStatus();
         return true;
       case tds.TDS7_RESULT_TOKEN:
-        _processResultToken();
+        await _processResultToken();
         return true;
       case tds.TDS_ROW_TOKEN:
-        _processRowToken();
+        await _processRowToken();
         return true;
       case tds.TDS_NBC_ROW_TOKEN:
-        _processNbcRowToken();
+        await _processNbcRowToken();
         return true;
       default:
         return false;
     }
   }
 
-  void _processReturnStatus() {
-    _returnStatus = _reader.getInt();
+  Future<void> _processReturnStatus() async {
+    _returnStatus = await _reader.getInt();
     _hasStatus = true;
     _trace('returnstatus', {'value': _returnStatus});
   }
 
-  void _processDone(int marker) {
-    final status = _reader.getUSmallInt();
-    _reader.getUSmallInt(); // cur_cmd
+  Future<void> _processDone(int marker) async {
+    final status = await _reader.getUSmallInt();
+    await _reader.getUSmallInt();
     final hasMore = (status & tds.TDS_DONE_MORE_RESULTS) != 0;
     final wasCancelled = (status & tds.TDS_DONE_CANCELLED) != 0;
     final countValid = (status & tds.TDS_DONE_COUNT) != 0;
-    final rows = tds.isTds72Plus(this) ? _reader.getInt8() : _reader.getInt();
+    final rows = tds.isTds72Plus(this)
+        ? await _reader.getInt8()
+        : await _reader.getInt();
     _doneFlags = status;
     _rowsAffected = countValid ? rows : tds.TDS_NO_COUNT;
     _moreRows = hasMore;
@@ -580,13 +668,13 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     }
   }
 
-  tds.Message _processMessage(int marker) {
-    final size = _reader.getSmallInt();
+  Future<tds.Message> _processMessage(int marker) async {
+    final size = await _reader.getSmallInt();
     final message = <String, dynamic>{
       'marker': marker,
-      'msgno': _reader.getInt(),
-      'state': _reader.getByte(),
-      'severity': _reader.getByte(),
+      'msgno': await _reader.getInt(),
+      'state': await _reader.getByte(),
+      'severity': await _reader.getByte(),
       'sql_state': null,
       'priv_msg_type': marker == tds.TDS_INFO_TOKEN ? 0 : 1,
       'message': '',
@@ -594,16 +682,17 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
       'proc_name': '',
       'line_number': 0,
     };
-    final textLen = _reader.getSmallInt();
-    message['message'] = _reader.readUcs2(textLen);
-    final serverNameLen = _reader.getByte();
-    message['server'] = _reader.readUcs2(serverNameLen);
-    final procNameLen = _reader.getByte();
-    message['proc_name'] = _reader.readUcs2(procNameLen);
+    final textLen = await _reader.getSmallInt();
+    message['message'] = await _reader.readUcs2(textLen);
+    final serverNameLen = await _reader.getByte();
+    message['server'] = await _reader.readUcs2(serverNameLen);
+    final procNameLen = await _reader.getByte();
+    message['proc_name'] = await _reader.readUcs2(procNameLen);
     final hasLongLineNumber = tds.isTds72Plus(this);
     final lineByteCount = hasLongLineNumber ? 4 : 2;
-    message['line_number'] =
-        hasLongLineNumber ? _reader.getInt() : _reader.getSmallInt();
+    message['line_number'] = hasLongLineNumber
+        ? await _reader.getInt()
+        : await _reader.getSmallInt();
     final consumed = 4 +
         1 +
         1 +
@@ -616,7 +705,7 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
         lineByteCount;
     final remaining = size - consumed;
     if (remaining > 0) {
-      _reader.readBytes(remaining);
+      await _reader.readBytes(remaining);
     }
     _trace('message', {
       'marker': marker,
@@ -629,34 +718,34 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     return message;
   }
 
-  void _processEnvChange() {
-    final size = _reader.getSmallInt();
-    final typeId = _reader.getByte();
+  Future<void> _processEnvChange() async {
+    final size = await _reader.getSmallInt();
+    final typeId = await _reader.getByte();
     final traceData = <String, Object?>{'type': typeId};
     switch (typeId) {
       case tds.TDS_ENV_SQLCOLLATION:
-        final payload = _reader.getByte();
+        final payload = await _reader.getByte();
         if (payload >= Collation.wire_size) {
-          final bytes = _reader.readBytes(Collation.wire_size);
+          final bytes = await _reader.readBytes(Collation.wire_size);
           _collation = Collation.unpack(bytes);
           _connectionCollation = _collation;
           _onCollationChanged?.call(_collation);
           traceData['new'] = _collation?.toString();
           final extra = payload - Collation.wire_size;
           if (extra > 0) {
-            _reader.readBytes(extra);
+            await _reader.readBytes(extra);
           }
         } else {
-          _reader.readBytes(payload);
+          await _reader.readBytes(payload);
         }
-        final oldLen = _reader.getByte();
+        final oldLen = await _reader.getByte();
         if (oldLen > 0) {
-          _reader.readBytes(oldLen);
+          await _reader.readBytes(oldLen);
         }
         break;
       case tds.TDS_ENV_PACKSIZE:
-        final newVal = _reader.readUcs2(_reader.getByte());
-        _reader.readUcs2(_reader.getByte());
+        final newVal = await _reader.readUcs2(await _reader.getByte());
+        await _reader.readUcs2(await _reader.getByte());
         final block = int.tryParse(newVal);
         if (block != null && block >= 512) {
           _writer.bufsize = block;
@@ -664,49 +753,49 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
         traceData['new'] = block ?? newVal;
         break;
       case tds.TDS_ENV_CHARSET:
-        final newCharset = _reader.readUcs2(_reader.getByte());
-        _reader.readUcs2(_reader.getByte());
+        final newCharset = await _reader.readUcs2(await _reader.getByte());
+        await _reader.readUcs2(await _reader.getByte());
         _env.charset = newCharset;
         traceData['new'] = newCharset;
         break;
       case tds.TDS_ENV_DB_MIRRORING_PARTNER:
-        final partner = _reader.readUcs2(_reader.getByte());
-        _reader.readUcs2(_reader.getByte());
+        final partner = await _reader.readUcs2(await _reader.getByte());
+        await _reader.readUcs2(await _reader.getByte());
         _env.mirroringPartner = partner;
         traceData['new'] = partner;
         break;
       case tds.TDS_ENV_LCID:
-        final lcidStr = _reader.readUcs2(_reader.getByte());
+        final lcidStr = await _reader.readUcs2(await _reader.getByte());
         final lcid = int.tryParse(lcidStr);
         if (lcid != null) {
           _env.charset = lcid2charset(lcid);
         }
         traceData['new'] = lcid ?? lcidStr;
-        final oldLcidLen = _reader.getByte();
+        final oldLcidLen = await _reader.getByte();
         if (oldLcidLen > 0) {
-          _reader.readUcs2(oldLcidLen);
+          await _reader.readUcs2(oldLcidLen);
         }
         break;
       case tds.TDS_ENV_UNICODE_DATA_SORT_COMP_FLAGS:
-        final newFlags = _reader.readUcs2(_reader.getByte());
-        final oldFlagsLen = _reader.getByte();
+        final newFlags = await _reader.readUcs2(await _reader.getByte());
+        final oldFlagsLen = await _reader.getByte();
         if (oldFlagsLen > 0) {
-          _reader.readUcs2(oldFlagsLen);
+          await _reader.readUcs2(oldFlagsLen);
         }
         _onUnicodeSortFlags?.call(newFlags);
         traceData['new'] = newFlags;
         break;
       case tds.TDS_ENV_BEGINTRANS:
-        final newSize = _reader.getByte();
+        final newSize = await _reader.getByte();
         int? txnValue;
         if (newSize == 8) {
-          txnValue = _reader.getUInt8();
+          txnValue = await _reader.getUInt8();
         } else if (newSize > 0) {
-          txnValue = _decodeLittleEndianInt(_reader.readBytes(newSize));
+          txnValue = _decodeLittleEndianInt(await _reader.readBytes(newSize));
         }
-        final oldSize = _reader.getByte();
+        final oldSize = await _reader.getByte();
         if (oldSize > 0) {
-          _reader.readBytes(oldSize);
+          await _reader.readBytes(oldSize);
         }
         if (txnValue != null) {
           _onTransactionStateChange?.call(txnValue);
@@ -715,35 +804,36 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
         break;
       case tds.TDS_ENV_COMMITTRANS:
       case tds.TDS_ENV_ROLLBACKTRANS:
-        final newTxSize = _reader.getByte();
+        final newTxSize = await _reader.getByte();
         if (newTxSize > 0) {
-          _reader.readBytes(newTxSize);
+          await _reader.readBytes(newTxSize);
         }
-        final oldTxSize = _reader.getByte();
+        final oldTxSize = await _reader.getByte();
         if (oldTxSize > 0) {
-          _reader.readBytes(oldTxSize);
+          await _reader.readBytes(oldTxSize);
         }
         _onTransactionStateChange?.call(0);
         traceData['new'] = 0;
         break;
       case tds.TDS_ENV_DATABASE:
-        final newDb = _reader.readUcs2(_reader.getByte());
-        _reader.readUcs2(_reader.getByte());
+        final newDb = await _reader.readUcs2(await _reader.getByte());
+        await _reader.readUcs2(await _reader.getByte());
         _env.database = newDb;
         traceData['new'] = newDb;
         break;
       case tds.TDS_ENV_LANG:
-        final newLang = _reader.readUcs2(_reader.getByte());
-        _reader.readUcs2(_reader.getByte());
+        final newLang = await _reader.readUcs2(await _reader.getByte());
+        await _reader.readUcs2(await _reader.getByte());
         _env.language = newLang;
         traceData['new'] = newLang;
         break;
       case tds.TDS_ENV_ROUTING:
-        _reader.getUSmallInt();
-        final protocol = _reader.getByte();
-        final protocolProperty = _reader.getUSmallInt();
-        final serverLen = _reader.getUSmallInt();
-        final serverName = serverLen > 0 ? _reader.readUcs2(serverLen) : '';
+        await _reader.getUSmallInt();
+        final protocol = await _reader.getByte();
+        final protocolProperty = await _reader.getUSmallInt();
+        final serverLen = await _reader.getUSmallInt();
+        final serverName =
+            serverLen > 0 ? await _reader.readUcs2(serverLen) : '';
         final routeInfo = <String, dynamic>{
           'protocol': protocol,
           'port': protocolProperty,
@@ -754,38 +844,38 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
           ..['protocol'] = protocol
           ..['port'] = protocolProperty
           ..['server'] = serverName;
-        final oldValueLen = _reader.getUSmallInt();
+        final oldValueLen = await _reader.getUSmallInt();
         if (oldValueLen > 0) {
-          _reader.readBytes(oldValueLen);
+          await _reader.readBytes(oldValueLen);
         }
         break;
       default:
         final toSkip = size - 1;
         if (toSkip > 0) {
-          _reader.readBytes(toSkip);
+          await _reader.readBytes(toSkip);
         }
         traceData['unknown'] = true;
     }
     _trace('envchange', traceData);
   }
 
-  void _skipToken(int marker) {
+  Future<void> _skipToken(int marker) async {
     switch (marker) {
       case tds.TDS5_PARAMFMT2_TOKEN:
       case tds.TDS_LANGUAGE_TOKEN:
       case tds.TDS_ORDERBY2_TOKEN:
-        final len32 = _reader.getSmallInt();
+        final len32 = await _reader.getSmallInt();
         if (len32 > 0) {
-          _reader.readBytes(len32);
+          await _reader.readBytes(len32);
         }
         break;
       case tds.TDS_TABNAME_TOKEN:
       case tds.TDS_COLINFO_TOKEN:
       case tds.TDS_CAPABILITY_TOKEN:
       case tds.TDS_ORDERBY_TOKEN:
-        final len = _reader.getSmallInt();
+        final len = await _reader.getSmallInt();
         if (len > 0) {
-          _reader.readBytes(len);
+          await _reader.readBytes(len);
         }
         break;
       default:
@@ -795,9 +885,8 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     }
   }
 
-  // ignore: unused_element
-  void _processResultToken() {
-    final columnCount = _reader.getSmallInt();
+  Future<void> _processResultToken() async {
+    final columnCount = await _reader.getSmallInt();
     if (columnCount == -1) {
       return;
     }
@@ -812,14 +901,14 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     _returnStatus = null;
     _moreRows = true;
     for (var i = 0; i < columnCount; i++) {
-      _readColumnMetadata(results.columns[i], results.description);
+      await _readColumnMetadata(results.columns[i], results.description);
     }
     final columnNames =
         results.columns.map((col) => col.columnName).toList(growable: false);
     _rebuildRowFactory(columnNames: columnNames);
   }
 
-  void _processRowToken() {
+  Future<void> _processRowToken() async {
     final metadata = _results;
     if (metadata == null) {
       _badStream('ROW recebido antes de COLMETADATA');
@@ -827,65 +916,65 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     final safeInfo = metadata!;
     safeInfo.rowCount += 1;
     for (var i = 0; i < safeInfo.columns.length; i++) {
-      _currentRow[i] = _readColumnValueSync(safeInfo.columns[i]);
+      _currentRow[i] = await _readColumnValueAsync(safeInfo.columns[i]);
     }
     _trace('row', {'values': List<dynamic>.from(_currentRow)});
   }
 
-  void _processNbcRowToken() {
+  Future<void> _processNbcRowToken() async {
     final metadata = _results;
     if (metadata == null) {
       _badStream('NBCROW recebido antes de COLMETADATA');
     }
     final safeInfo = metadata!;
-    final nullBitmap = _reader.readBytes((safeInfo.columns.length + 7) >> 3);
+    final nullBitmap = await _reader.readBytes((safeInfo.columns.length + 7) >> 3);
     safeInfo.rowCount += 1;
     for (var i = 0; i < safeInfo.columns.length; i++) {
       final isNull = (nullBitmap[i >> 3] & (1 << (i & 7))) != 0;
       if (isNull) {
         _currentRow[i] = null;
       } else {
-        _currentRow[i] = _readColumnValueSync(safeInfo.columns[i]);
+        _currentRow[i] = await _readColumnValueAsync(safeInfo.columns[i]);
       }
     }
     _trace('nbcrow', {'values': List<dynamic>.from(_currentRow)});
   }
 
-  dynamic _readColumnValueSync(tds.Column column) {
+  Future<dynamic> _readColumnValueAsync(tds.Column column) async {
     final typeInfo = column.serializer;
     if (typeInfo is! _TypeInfo) {
       throw tds.InterfaceError('Metadados de coluna ausentes para ${column.columnName}');
     }
     switch (typeInfo.typeId) {
       case tds.BITTYPE:
-        return _reader.getByte() != 0;
+        return (await _reader.getByte()) != 0;
       case tds.INT1TYPE:
-        return _reader.getByte();
+        return await _reader.getByte();
       case tds.INT2TYPE:
-        return _reader.getSmallInt();
+        return await _reader.getSmallInt();
       case tds.INT4TYPE:
-        return _reader.getInt();
+        return await _reader.getInt();
       case tds.INT8TYPE:
-        return _reader.getInt8();
+        return await _reader.getInt8();
       case tds.INTNTYPE:
-        return _readIntnValueSync();
+        return await _readIntnValueAsync();
       case tds.BIGVARCHRTYPE:
       case tds.BIGCHARTYPE:
-        return _readAnsiValueSync(lengthBytes: 2);
+        return await _readAnsiValueAsync(lengthBytes: 2);
       case tds.SYBVARCHAR:
       case tds.SYBCHAR:
-        return _readAnsiValueSync(lengthBytes: 1);
+        return await _readAnsiValueAsync(lengthBytes: 1);
       case tds.NVARCHARTYPE:
       case tds.NCHARTYPE:
-        return _readUnicodeValueSync(lengthBytes: 2);
+        return await _readUnicodeValueAsync(lengthBytes: 2);
       case tds.SYBNVARCHAR:
-        return _readUnicodeValueSync(lengthBytes: 1);
+        return await _readUnicodeValueAsync(lengthBytes: 1);
       case tds.BIGVARBINTYPE:
       case tds.BIGBINARYTYPE:
-        return _readBinaryValueSync(lengthBytes: 2);
+        return await _readBinaryValueAsync(lengthBytes: 2);
       case tds.SYBVARBINARY:
       case tds.BINARYTYPE:
-        return _readBinaryValueSync(lengthBytes: 1);
+        return await _readBinaryValueAsync(lengthBytes: 1);
       default:
         throw tds.NotSupportedError(
           'Leitura de valores para o tipo ${typeInfo.typeId} ainda não foi portada',
@@ -893,74 +982,77 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     }
   }
 
-  dynamic _readIntnValueSync() {
-    final length = _reader.getByte();
+  Future<dynamic> _readIntnValueAsync() async {
+    final length = await _reader.getByte();
     if (length == 0) {
       return null;
     }
     switch (length) {
       case 1:
-        return _reader.getByte();
+        return await _reader.getByte();
       case 2:
-        return _reader.getSmallInt();
+        return await _reader.getSmallInt();
       case 4:
-        return _reader.getInt();
+        return await _reader.getInt();
       case 8:
-        return _reader.getInt8();
+        return await _reader.getInt8();
       default:
         throw tds.InterfaceError('Comprimento inválido para INTN: $length');
     }
   }
 
-  dynamic _readAnsiValueSync({required int lengthBytes}) {
-    final length = lengthBytes == 2 ? _reader.getUSmallInt() : _reader.getByte();
+  Future<dynamic> _readAnsiValueAsync({required int lengthBytes}) async {
+    final length =
+        lengthBytes == 2 ? await _reader.getUSmallInt() : await _reader.getByte();
     if ((lengthBytes == 2 && length == 0xFFFF) ||
         (lengthBytes == 1 && length == 0xFF)) {
       return null;
     }
-    final data = _reader.readBytes(length);
+    final data = await _reader.readBytes(length);
     return data;
   }
 
-  dynamic _readBinaryValueSync({required int lengthBytes}) {
-    final length = lengthBytes == 2 ? _reader.getUSmallInt() : _reader.getByte();
+  Future<dynamic> _readBinaryValueAsync({required int lengthBytes}) async {
+    final length =
+        lengthBytes == 2 ? await _reader.getUSmallInt() : await _reader.getByte();
     if ((lengthBytes == 2 && length == 0xFFFF) ||
         (lengthBytes == 1 && length == 0xFF)) {
       return null;
     }
-    return _reader.readBytes(length);
+    return await _reader.readBytes(length);
   }
 
-  dynamic _readUnicodeValueSync({required int lengthBytes}) {
+  Future<dynamic> _readUnicodeValueAsync({required int lengthBytes}) async {
     if (lengthBytes == 1) {
-      final charCount = _reader.getByte();
+      final charCount = await _reader.getByte();
       if (charCount == 0xFF) {
         return null;
       }
-      final data = _reader.readBytes(charCount * 2);
+      final data = await _reader.readBytes(charCount * 2);
       return _bytesToUnicode ? ucs2Codec.decode(data) : data;
     }
-    final byteLength = _reader.getUSmallInt();
+    final byteLength = await _reader.getUSmallInt();
     if (byteLength == 0xFFFF) {
       return null;
     }
-    final data = _reader.readBytes(byteLength);
+    final data = await _reader.readBytes(byteLength);
     return _bytesToUnicode ? ucs2Codec.decode(data) : data;
   }
 
-  void _readColumnMetadata(
+  Future<void> _readColumnMetadata(
     tds.Column column,
     List<List<dynamic>> description,
-  ) {
-    column.columnUserType =
-        tds.isTds72Plus(this) ? _reader.getUInt() : _reader.getUSmallInt();
-    column.flags = _reader.getUSmallInt();
-    final typeId = _reader.getByte();
-    final typeInfo = _readTypeInfoPayload(typeId);
+  ) async {
+    column.columnUserType = tds.isTds72Plus(this)
+        ? await _reader.getUInt()
+        : await _reader.getUSmallInt();
+    column.flags = await _reader.getUSmallInt();
+    final typeId = await _reader.getByte();
+    final typeInfo = await _readTypeInfoPayload(typeId);
     column.serializer = typeInfo;
     column.type = typeId;
-    final nameLength = _reader.getByte();
-    column.columnName = nameLength > 0 ? _reader.readUcs2(nameLength) : '';
+    final nameLength = await _reader.getByte();
+    column.columnName = nameLength > 0 ? await _reader.readUcs2(nameLength) : '';
     final nullable = (column.flags & tds.Column.fNullable) != 0;
     description.add([
       column.columnName,
@@ -973,7 +1065,7 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     ]);
   }
 
-  _TypeInfo _readTypeInfoPayload(int typeId) {
+  Future<_TypeInfo> _readTypeInfoPayload(int typeId) async {
     switch (typeId) {
       case tds.BITTYPE:
         return const _TypeInfo(typeId: tds.BITTYPE, maxLength: 1);
@@ -1006,13 +1098,13 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
       case tds.MONEYNTYPE:
       case tds.DATETIMNTYPE:
       case tds.FLTNTYPE:
-        final length = _reader.getByte();
+        final length = await _reader.getByte();
         return _TypeInfo(typeId: typeId, maxLength: length);
       case tds.DECIMALNTYPE:
       case tds.NUMERICNTYPE:
-        final storage = _reader.getByte();
-        final precision = _reader.getByte();
-        final scale = _reader.getByte();
+        final storage = await _reader.getByte();
+        final precision = await _reader.getByte();
+        final scale = await _reader.getByte();
         return _TypeInfo(
           typeId: typeId,
           maxLength: storage,
@@ -1021,16 +1113,16 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
         );
       case tds.BIGVARBINTYPE:
       case tds.BIGBINARYTYPE:
-        final length = _reader.getUSmallInt();
+        final length = await _reader.getUSmallInt();
         return _TypeInfo(typeId: typeId, maxLength: length);
       case tds.SYBVARBINARY:
       case tds.BINARYTYPE:
-        final byteLen = _reader.getByte();
+        final byteLen = await _reader.getByte();
         return _TypeInfo(typeId: typeId, maxLength: byteLen);
       case tds.BIGVARCHRTYPE:
       case tds.BIGCHARTYPE:
-        final length = _reader.getUSmallInt();
-        final collation = _reader.getCollation();
+        final length = await _reader.getUSmallInt();
+        final collation = await _reader.getCollation();
         return _TypeInfo(
           typeId: typeId,
           maxLength: length,
@@ -1038,8 +1130,8 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
         );
       case tds.SYBVARCHAR:
       case tds.SYBCHAR:
-        final lenByte = _reader.getByte();
-        final collation = _reader.getCollation();
+        final lenByte = await _reader.getByte();
+        final collation = await _reader.getCollation();
         return _TypeInfo(
           typeId: typeId,
           maxLength: lenByte,
@@ -1047,8 +1139,8 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
         );
       case tds.NVARCHARTYPE:
       case tds.NCHARTYPE:
-        final length = _reader.getUSmallInt();
-        final collation = _reader.getCollation();
+        final length = await _reader.getUSmallInt();
+        final collation = await _reader.getCollation();
         return _TypeInfo(
           typeId: typeId,
           maxLength: length,
@@ -1056,33 +1148,33 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
         );
       case tds.TEXTTYPE:
       case tds.NTEXTTYPE:
-        final size = _reader.getInt();
-        final collation = _reader.getCollation();
-        final parts = _readMultipartIdentifier();
+        final sizeVal = await _reader.getInt();
+        final collation = await _reader.getCollation();
+        final parts = await _readMultipartIdentifier();
         return _TypeInfo(
           typeId: typeId,
-          maxLength: size,
+          maxLength: sizeVal,
           collation: collation,
           schema: parts,
         );
       case tds.XMLTYPE:
-        final hasSchema = _reader.getByte();
+        final hasSchema = await _reader.getByte();
         if (hasSchema == 0) {
           return const _TypeInfo(typeId: tds.XMLTYPE);
         }
-        final dbName = _reader.readUcs2(_reader.getByte());
-        final owner = _reader.readUcs2(_reader.getByte());
-        final collection = _reader.readUcs2(_reader.getSmallInt());
+        final dbName = await _reader.readUcs2(await _reader.getByte());
+        final owner = await _reader.readUcs2(await _reader.getByte());
+        final collection = await _reader.readUcs2(await _reader.getSmallInt());
         return _TypeInfo(
           typeId: typeId,
           schema: [dbName, owner, collection],
         );
       case tds.UDTTYPE:
-        final maxByteSize = _reader.getUSmallInt();
-        final dbName = _reader.readUcs2(_reader.getByte());
-        final schemaName = _reader.readUcs2(_reader.getByte());
-        final typeName = _reader.readUcs2(_reader.getByte());
-        final asmName = _reader.readUcs2(_reader.getSmallInt());
+        final maxByteSize = await _reader.getUSmallInt();
+        final dbName = await _reader.readUcs2(await _reader.getByte());
+        final schemaName = await _reader.readUcs2(await _reader.getByte());
+        final typeName = await _reader.readUcs2(await _reader.getByte());
+        final asmName = await _reader.readUcs2(await _reader.getSmallInt());
         return _TypeInfo(
           typeId: typeId,
           maxLength: maxByteSize,
@@ -1091,7 +1183,7 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
       case tds.TIMENTYPE:
       case tds.DATETIME2NTYPE:
       case tds.DATETIMEOFFSETNTYPE:
-        final precision = _reader.getByte();
+        final precision = await _reader.getByte();
         return _TypeInfo(typeId: typeId, precision: precision);
       default:
         throw tds.NotSupportedError(
@@ -1100,19 +1192,19 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     }
   }
 
-  List<String> _readMultipartIdentifier() {
+  Future<List<String>> _readMultipartIdentifier() async {
     if (!tds.isTds72Plus(this)) {
-      final len = _reader.getSmallInt();
+      final len = await _reader.getSmallInt();
       if (len <= 0) {
         return const <String>[];
       }
-      return <String>[_reader.readUcs2(len)];
+      return <String>[await _reader.readUcs2(len)];
     }
     final parts = <String>[];
-    final count = _reader.getByte();
+    final count = await _reader.getByte();
     for (var i = 0; i < count; i++) {
-      final len = _reader.getSmallInt();
-      parts.add(len > 0 ? _reader.readUcs2(len) : '');
+      final len = await _reader.getSmallInt();
+      parts.add(len > 0 ? await _reader.readUcs2(len) : '');
     }
     return parts;
   }
@@ -1138,14 +1230,14 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     _setRowStrategy(strategy);
   }
 
-  void _startQuery() {
+  Future<void> _startQuery() async {
     final data = ByteData(22)
       ..setUint32(0, 0x16, Endian.little)
       ..setUint32(4, 0x12, Endian.little)
       ..setUint16(8, 2, Endian.little)
       ..setUint64(10, 0, Endian.little)
       ..setUint32(18, 1, Endian.little);
-    _writer.write(data.buffer.asUint8List());
+    await _writer.write(data.buffer.asUint8List());
     _trace('query.start', {'tran': _env.isolationLevel});
   }
 
@@ -1170,10 +1262,10 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     _rowConvertor(const <dynamic>[]);
   }
 
-  int _nextTokenId() {
+  Future<int> _nextTokenId() async {
     _state = tds.TDS_READING;
     try {
-      final marker = _reader.getByte();
+      final marker = await _reader.getByte();
       _trace('token', {
         'marker': marker,
         'name': _tokenNames[marker] ?? '0x${marker.toRadixString(16)}',
@@ -1185,12 +1277,12 @@ class TdsSession implements SessionLink, tds.TdsSessionContract {
     }
   }
 
-  void _sendCancel() {
+  Future<void> _sendCancel() async {
     if (_inCancel) {
       return;
     }
     _writer.beginPacket(tds.PacketType.CANCEL);
-    _writer.flush();
+    await _writer.flush();
     _inCancel = true;
   }
 

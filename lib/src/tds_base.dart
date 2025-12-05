@@ -703,6 +703,16 @@ abstract class TransportProtocol {
   int recvInto(ByteBuffer buf, {int size = 0, int flags = 0});
 }
 
+abstract class AsyncTransportProtocol {
+  bool get isConnected;
+  Future<void> close();
+  Duration? get timeout;
+  set timeout(Duration? value);
+  Future<void> sendAll(List<int> data, {int flags = 0});
+  Future<Uint8List> recv(int size);
+  Future<int> recvInto(ByteBuffer buffer, {int size = 0, int flags = 0});
+}
+
 abstract class LoadBalancer {
   Iterable<String> choose();
 }
@@ -828,6 +838,7 @@ class TdsEnv {
   String? database;
   String? language;
   String? charset;
+  String? mirroringPartner;
   bool autocommit = false;
   int isolationLevel = 0;
 }
