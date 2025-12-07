@@ -291,7 +291,7 @@ class AsyncTdsReader implements tds.AsyncTransportProtocol {
         _size = bufsize,
         _status = 1;
 
-  final tds.AsyncTransportProtocol _transport;
+  tds.AsyncTransportProtocol _transport;
   final tds.TdsSessionContract session;
 
   Uint8List _buf;
@@ -300,6 +300,14 @@ class AsyncTdsReader implements tds.AsyncTransportProtocol {
   int _status;
   int? _type;
   int _spid = 0;
+
+  /// Obtém o transporte atual.
+  tds.AsyncTransportProtocol get transport => _transport;
+  
+  /// Define um novo transporte (usado para TLS upgrade).
+  void setTransport(tds.AsyncTransportProtocol value) {
+    _transport = value;
+  }
 
   int get bufsize => _buf.length;
   int get blockSize => _buf.length;
@@ -452,6 +460,11 @@ class AsyncTdsReader implements tds.AsyncTransportProtocol {
     final slice = Uint8List.sublistView(_buf, _pos, _pos + toRead);
     _pos += toRead;
     return slice;
+  }
+
+  @override
+  Future<Uint8List> recvAvailable(int maxSize) {
+    return recv(maxSize);
   }
 
   @override

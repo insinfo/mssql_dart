@@ -176,7 +176,7 @@ class AsyncTdsWriter {
         _buf = Uint8List(bufsize),
         _pos = _tdsHeaderSize;
 
-  final tds.AsyncTransportProtocol _transport;
+  tds.AsyncTransportProtocol _transport;
   final tds.TdsSessionContract session;
 
   Uint8List _buf;
@@ -185,7 +185,13 @@ class AsyncTdsWriter {
   int _packetType = tds.PacketType.QUERY;
   final Uint8List _scratch = Uint8List(8);
 
+  /// Obtém o transporte atual.
   tds.AsyncTransportProtocol get transport => _transport;
+  
+  /// Define um novo transporte (usado para TLS upgrade).
+  void setTransport(tds.AsyncTransportProtocol value) {
+    _transport = value;
+  }
 
   int get bufsize => _buf.length;
   set bufsize(int size) {

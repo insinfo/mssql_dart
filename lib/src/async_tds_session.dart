@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -16,6 +17,7 @@ import 'tds_reader.dart';
 import 'tds_writer.dart';
 import 'tds_types.dart';
 import 'transport_tls.dart';
+import 'tls/tls_channel.dart' as tls_channel;
 
 const int _clientLibraryVersion = 0x01000000;
 const String _defaultInstanceName = 'MSSQLServer';
@@ -299,31 +301,144 @@ class AsyncTdsSession implements AsyncSessionLink, tds.TdsSessionContract {
       return;
     }
 
-    final clientRequiresTls = login.encFlag == tds.PreLoginEnc.ENCRYPT_REQ;
-
+    final clientWantsTls = login.encFlag == tds.PreLoginEnc.ENCRYPT_ON ||
+                 login.encFlag == tds.PreLoginEnc.ENCRYPT_REQ;
+    final clientEncOff = login.encFlag == tds.PreLoginEnc.ENCRYPT_OFF;
+    
     switch (cryptFlag) {
       case tds.PreLoginEnc.ENCRYPT_OFF:
-        if (clientRequiresTls) {
+        if (clientWantsTls && !login.encLoginOnly) {
           throw tds.OperationalError(
-            'A conexão atual foi aberta sem TLS-first, mas o cliente exige criptografia. Refaça connectAsync com encrypt=true.',
+            'O servidor retornou ENCRYPT_OFF mas o cliente exige criptografia completa. '
+            'Use encLoginOnly=true se quiser apenas criptografar o login.',
           );
         }
+        // Servidor quer ENCRYPT_OFF - se cliente pediu, fazemos login encriptado apenas
+        if (clientEncOff && login.tlsCtx != null) {
+          // Cliente pediu ENCRYPT_OFF com certificado -> criptografar apenas login
+          final upgraded = await _tryNativeTlsUpgrade(login, tlsTransport);
+          if (!upgraded) {
+            await _performTlsUpgrade(login);
+          }
+        }
         return;
+        
       case tds.PreLoginEnc.ENCRYPT_NOT_SUP:
-        if (clientRequiresTls) {
+        if (clientWantsTls) {
           throw tds.OperationalError(
-            'O servidor não suporta criptografia para este login. Ajuste encrypt=false se quiser seguir em modo plaintext.',
+            'O servidor não suporta criptografia para este login. '
+            'Ajuste encrypt=false se quiser seguir em modo plaintext.',
           );
         }
         return;
+        
       case tds.PreLoginEnc.ENCRYPT_ON:
       case tds.PreLoginEnc.ENCRYPT_REQ:
-        throw tds.OperationalError(
-          'O servidor exige criptografia TLS, mas esta conexão foi aberta em modo plaintext. Refaça connectAsync com encrypt=true.',
-        );
+        // Servidor exige TLS - devemos fazer upgrade
+        if (clientEncOff && !login.encLoginOnly) {
+          throw tds.OperationalError(
+            'O servidor exige criptografia TLS, mas a conexão foi configurada com encrypt=false. '
+            'Ative encrypt=true ou forneça encLoginOnly=true apenas se aceitar permanecer em TLS.',
+          );
+        }
+        if (login.encFlag == tds.PreLoginEnc.ENCRYPT_NOT_SUP) {
+          throw tds.OperationalError(
+            'O servidor exige criptografia TLS, mas a conexão foi configurada com encrypt=false. '
+            'Ative encrypt=true ou escolha um backend TLS compatível.',
+          );
+        }
+        if (login.tlsBackend == tds.TlsBackend.dartSecureSocket &&
+            login.tlsCtx is! SecurityContext) {
+          throw tds.OperationalError(
+            'TlsBackend.dartSecureSocket requer SecurityContext válido para upgrade nativo. '
+            'Forneça um SecurityContext ou selecione outro backend TLS.',
+          );
+        }
+        final upgraded = await _tryNativeTlsUpgrade(login, tlsTransport);
+        if (!upgraded) {
+          await _performTlsUpgrade(login);
+        }
+        return;
+        
       default:
         _badStream('Valor inesperado de encrypt_flag retornado pelo servidor: $cryptFlag');
     }
+  }
+
+  Future<bool> _tryNativeTlsUpgrade(
+    tds.TdsLogin login,
+    AsyncTlsTransport? tlsTransport,
+  ) async {
+    if (tlsTransport == null) {
+      return false;
+    }
+    if (login.tlsBackend != tds.TlsBackend.dartSecureSocket) {
+      return false;
+    }
+    final ctx = login.tlsCtx;
+    if (ctx is! SecurityContext) {
+      throw tds.OperationalError(
+        'Contexto TLS inválido para SecureSocket. Informe SecurityContext ou selecione outro backend TLS.',
+      );
+    }
+    await tlsTransport.upgradeToSecureSocket(
+      context: ctx,
+      onBadCertificate: login.validateHost ? null : (_) => true,
+      host: login.serverName.isNotEmpty ? login.serverName : tlsTransport.remoteHost,
+      loginOnly: login.encLoginOnly,
+    );
+    _trace('tls.upgrade.native', {
+      'provider': 'dartSecureSocket',
+      'server': login.serverName,
+    });
+    return true;
+  }
+
+  /// Realiza o upgrade para TLS mid-stream.
+  Future<void> _performTlsUpgrade(tds.TdsLogin login) async {
+    final backend = _resolveMidstreamBackend(login);
+    
+    _trace('tls.upgrade.start', {
+      'backend': backend.name,
+      'server': login.serverName,
+      'enc_login_only': login.encLoginOnly,
+    });
+    
+    try {
+      await tls_channel.establishChannel(
+        session: _createTlsSessionAdapter(),
+        login: login,
+        backend: backend,
+      );
+      
+      _trace('tls.upgrade.complete', {
+        'backend': backend.name,
+      });
+    } catch (error) {
+      _trace('tls.upgrade.failed', {
+        'error': error.toString(),
+      });
+      rethrow;
+    }
+  }
+
+  tds.TlsBackend _resolveMidstreamBackend(tds.TdsLogin login) {
+    switch (login.tlsBackend) {
+      case tds.TlsBackend.tlslite:
+        return tds.TlsBackend.tlslite;
+      case tds.TlsBackend.openSsl:
+        return tds.TlsBackend.openSsl;
+      case tds.TlsBackend.dartSecureSocket:
+        throw tds.OperationalError(
+          'TlsBackend.dartSecureSocket não suporta upgrade TLS mid-stream. '
+          'Use encrypt=true para TLS-first ou selecione pureDart/openSsl.',
+        );
+    }
+  }
+
+  /// Cria um adapter para a interface TdsSessionForTls.
+  tls_channel.TdsSessionForTls _createTlsSessionAdapter() {
+    return _AsyncTdsSessionTlsAdapter(this);
   }
 
   @override
@@ -1913,3 +2028,77 @@ const Map<int, String> _tokenNames = {
   tds.TDS_CAPABILITY_TOKEN: 'CAPABILITY',
   tds.TDS7_RESULT_TOKEN: 'COLMETADATA',
 };
+
+// -----------------------------------------------------------------------------
+// Adapter para TLS mid-stream
+// -----------------------------------------------------------------------------
+
+/// Adapter que implementa [TdsSessionForTls] para [AsyncTdsSession].
+/// 
+/// Permite que o módulo TLS acesse o transporte, reader e writer da sessão
+/// para realizar o handshake TLS mid-stream.
+class _AsyncTdsSessionTlsAdapter implements tls_channel.TdsSessionForTls {
+  _AsyncTdsSessionTlsAdapter(this._session);
+  
+  final AsyncTdsSession _session;
+  
+  @override
+  tds.AsyncTransportProtocol get currentTransport => _session._transport;
+  
+  @override
+  tls_channel.TdsWriterForTls get writer => _AsyncTdsWriterTlsAdapter(_session._writer);
+  
+  @override
+  tls_channel.TdsReaderForTls get reader => _AsyncTdsReaderTlsAdapter(_session._reader);
+  
+  @override
+  void replaceTransport(tds.AsyncTransportProtocol newTransport) {
+    // Atualiza o transporte no reader e writer
+    _session._reader.setTransport(newTransport);
+    _session._writer.setTransport(newTransport);
+  }
+}
+
+/// Adapter do writer para TLS.
+class _AsyncTdsWriterTlsAdapter implements tls_channel.TdsWriterForTls {
+  _AsyncTdsWriterTlsAdapter(this._writer);
+  
+  final AsyncTdsWriter _writer;
+  
+  @override
+  void beginPacket(int packetType) => _writer.beginPacket(packetType);
+  
+  @override
+  Future<void> write(List<int> data) => _writer.write(Uint8List.fromList(data));
+  
+  @override
+  Future<void> flush() => _writer.flush();
+  
+  @override
+  tds.AsyncTransportProtocol get transport => _writer.transport;
+  
+  @override
+  set transport(tds.AsyncTransportProtocol value) => _writer.setTransport(value);
+}
+
+/// Adapter do reader para TLS.
+class _AsyncTdsReaderTlsAdapter implements tls_channel.TdsReaderForTls {
+  _AsyncTdsReaderTlsAdapter(this._reader);
+  
+  final AsyncTdsReader _reader;
+  
+  @override
+  Future<ResponseMetadata> beginResponse() => _reader.beginResponse();
+  
+  @override
+  Future<Uint8List> recv(int size) => _reader.recv(size);
+  
+  @override
+  bool streamFinished() => _reader.streamFinished();
+  
+  @override
+  tds.AsyncTransportProtocol get transport => _reader.transport;
+  
+  @override
+  set transport(tds.AsyncTransportProtocol value) => _reader.setTransport(value);
+}

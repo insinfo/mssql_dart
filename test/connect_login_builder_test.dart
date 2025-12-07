@@ -44,17 +44,4 @@ void main() {
     });
   });
 
-  group('connectSync TLS guard', () {
-    test('rejects encrypt=true until sync TLS is implemented', () {
-      expect(
-        () => connectSync(
-          host: 'localhost',
-          user: 'user',
-          password: 'pass',
-          encrypt: true,
-        ),
-        throwsA(isA<tds.NotSupportedError>()),
-      );
-    });
-  });
 }

@@ -15,13 +15,14 @@ void main() {
 
     setUp(() async {
       conn = await dbConnectAsync(
-        host: host,
-        port: port,
-        user: user,
-        password: password,
-        database: database,
-        bytesToUnicode: true,
-      );
+          host: host,
+          port: port,
+          user: user,
+          password: password,
+          database: database,
+          bytesToUnicode: true,
+          encrypt: false,
+          tlsBackend: TlsBackend.openSsl);
     });
 
     tearDown(() async {
@@ -41,12 +42,14 @@ void main() {
       final tableName = '#async_dbapi_${seed.toRadixString(16)}';
 
       final cursor = conn.cursor();
-      await cursor.execute('CREATE TABLE $tableName (id INT PRIMARY KEY, nome NVARCHAR(40));');
+      await cursor.execute(
+          'CREATE TABLE $tableName (id INT PRIMARY KEY, nome NVARCHAR(40));');
       await cursor.fetchall();
 
       addTearDown(() async {
         try {
-          await cursor.execute("IF OBJECT_ID('tempdb..$tableName') IS NOT NULL DROP TABLE $tableName");
+          await cursor.execute(
+              "IF OBJECT_ID('tempdb..$tableName') IS NOT NULL DROP TABLE $tableName");
           await cursor.fetchall();
         } catch (_) {
           // Falha original do teste é mais importante.
@@ -54,7 +57,8 @@ void main() {
       });
 
       for (var i = 0; i < 2; i++) {
-        await cursor.execute("INSERT INTO $tableName (id, nome) VALUES ($i, N'Nome $i')");
+        await cursor.execute(
+            "INSERT INTO $tableName (id, nome) VALUES ($i, N'Nome $i')");
         await cursor.fetchall();
       }
 
@@ -64,10 +68,12 @@ void main() {
 
       await cursor.execute('SELECT id, nome FROM $tableName ORDER BY id');
       final rows = (await cursor.fetchall()).cast<List<dynamic>>();
-      expect(rows, equals([
-        [0, 'Nome 0'],
-        [1, 'Nome 1'],
-      ]));
+      expect(
+          rows,
+          equals([
+            [0, 'Nome 0'],
+            [1, 'Nome 1'],
+          ]));
 
       await cursor.execute('DROP TABLE $tableName');
       await cursor.fetchall();
@@ -77,13 +83,17 @@ void main() {
     test('cursor respects nextset', () async {
       final cursor = conn.cursor();
       await cursor.execute('SELECT 1 AS primeira; SELECT 2 AS segunda;');
-      expect(await cursor.fetchall(), equals([
-        [1],
-      ]));
+      expect(
+          await cursor.fetchall(),
+          equals([
+            [1],
+          ]));
       expect(await cursor.nextset(), isTrue);
-      expect(await cursor.fetchall(), equals([
-        [2],
-      ]));
+      expect(
+          await cursor.fetchall(),
+          equals([
+            [2],
+          ]));
       expect(await cursor.nextset(), isFalse);
       await cursor.close();
     });
@@ -113,12 +123,14 @@ void main() {
       final tableName = '#async_many_${seed.toRadixString(16)}';
 
       final cursor = conn.cursor();
-      await cursor.execute('CREATE TABLE $tableName (id INT PRIMARY KEY, nome NVARCHAR(40));');
+      await cursor.execute(
+          'CREATE TABLE $tableName (id INT PRIMARY KEY, nome NVARCHAR(40));');
       await cursor.fetchall();
 
       addTearDown(() async {
         try {
-          await cursor.execute("IF OBJECT_ID('tempdb..$tableName') IS NOT NULL DROP TABLE $tableName");
+          await cursor.execute(
+              "IF OBJECT_ID('tempdb..$tableName') IS NOT NULL DROP TABLE $tableName");
           await cursor.fetchall();
         } catch (_) {}
       });
@@ -145,12 +157,68 @@ void main() {
 
       await cursor.execute('SELECT id, nome FROM $tableName ORDER BY id');
       final rows = (await cursor.fetchall()).cast<List<dynamic>>();
-      expect(rows, equals([
-        [0, 'Atualizado 0'],
-        [1, 'Atualizado 1'],
-      ]));
+      expect(
+          rows,
+          equals([
+            [0, 'Atualizado 0'],
+            [1, 'Atualizado 1'],
+          ]));
 
       await cursor.close();
     });
+
+    test('manages dozens of concurrent analytical queries', () async {
+      const clients = 16;
+      const iterationsPerClient = 12;
+      const seriesSize = 1500;
+      const baseSum = seriesSize * (seriesSize + 1) ~/ 2;
+
+      Future<void> runClient(int clientIndex) async {
+        final local = await dbConnectAsync(
+          host: host,
+          port: port,
+          user: user,
+          password: password,
+          database: database,
+          bytesToUnicode: true,
+          encrypt: true,
+          tlsBackend: TlsBackend.tlslite,
+        );
+
+        try {
+          final cursor = local.cursor();
+          try {
+            for (var iteration = 0;
+                iteration < iterationsPerClient;
+                iteration++) {
+              await cursor.execute('''
+WITH numbers AS (
+  SELECT TOP ($seriesSize) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n
+  FROM sys.all_columns
+)
+SELECT SUM(numbers.n) + $clientIndex + $iteration AS total
+FROM numbers;
+''');
+
+              final rows = (await cursor.fetchall()).cast<List<dynamic>>();
+              expect(rows.length, equals(1));
+              expect(rows.first.length, equals(1));
+              expect(
+                rows.first.first,
+                equals(baseSum + clientIndex + iteration),
+                reason:
+                    'Unexpected total for client $clientIndex iteration $iteration',
+              );
+            }
+          } finally {
+            await cursor.close();
+          }
+        } finally {
+          await local.close();
+        }
+      }
+
+      await Future.wait(List.generate(clients, runClient));
+    }, timeout: const Timeout(Duration(minutes: 2)));
   });
 }

@@ -5,7 +5,6 @@ import 'dart:typed_data';
 
 import 'tds_base.dart' as tds;
 import 'transport_tls.dart';
-
 class AsyncSocketTransport implements tds.AsyncTransportProtocol, AsyncTlsTransport {
   AsyncSocketTransport._(
     this._socket, {
@@ -86,6 +85,9 @@ class AsyncSocketTransport implements tds.AsyncTransportProtocol, AsyncTlsTransp
   int _available = 0;
   Completer<void>? _pendingRead;
   bool _secure = false;
+
+  /// Expõe o Socket subjacente para cenários que ainda dependem do objeto real.
+  Socket get socket => _socket;
 
   @override
   bool get isConnected => _connected;
@@ -172,6 +174,25 @@ class AsyncSocketTransport implements tds.AsyncTransportProtocol, AsyncTlsTransp
   }
 
   @override
+  Future<Uint8List> recvAvailable(int maxSize) async {
+    if (maxSize <= 0) {
+      return Uint8List(0);
+    }
+    while (_available == 0 && _connected) {
+      await _waitForData();
+    }
+    if (_available == 0 && !_connected) {
+      final error = _socketError;
+      if (error != null) {
+        throw error;
+      }
+      throw tds.ClosedConnectionError();
+    }
+    final toRead = maxSize < _available ? maxSize : _available;
+    return _consumeBytes(toRead);
+  }
+
+  @override
   Future<int> recvInto(ByteBuffer buffer, {int size = 0, int flags = 0}) async {
     final target = buffer.asUint8List();
     final desired = size <= 0 || size > target.length ? target.length : size;
@@ -210,6 +231,11 @@ class AsyncSocketTransport implements tds.AsyncTransportProtocol, AsyncTlsTransp
     _connected = false;
     await _subscription?.cancel();
     _subscription = null;
+    try {
+      await _socket.flush();
+    } catch (_) {
+      // Ignore flush errors on close
+    }
     await _socket.close();
     _chunks.clear();
     _available = 0;

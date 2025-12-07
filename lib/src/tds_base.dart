@@ -710,6 +710,7 @@ abstract class AsyncTransportProtocol {
   set timeout(Duration? value);
   Future<void> sendAll(List<int> data, {int flags = 0});
   Future<Uint8List> recv(int size);
+  Future<Uint8List> recvAvailable(int maxSize);
   Future<int> recvInto(ByteBuffer buffer, {int size = 0, int flags = 0});
 }
 
@@ -786,6 +787,19 @@ List<int> tds7CryptPass(String password) {
 // -----------------------------------------------------------------------------
 // _TdsLogin Class
 // -----------------------------------------------------------------------------
+
+/// Backend TLS preferido pelo cliente.
+enum TlsBackend {
+  /// Usa o SecureSocket nativo do Dart (requer conexão TLS-first).
+  dartSecureSocket,
+  
+  /// Usa OpenSSL via FFI (permite upgrade mid-stream).
+  openSsl,
+  
+  /// Usa implementação pura Dart do tlslite (permite upgrade mid-stream).
+  tlslite,
+}
+
 class TdsLogin {
   String clientHostName = "";
   String library = "";
@@ -809,7 +823,12 @@ class TdsLogin {
   bool validateHost = true;
   bool encLoginOnly = false;
   int encFlag = 0;
-  dynamic tlsCtx; // Contexto TLS não implementado
+  dynamic tlsCtx; // Contexto TLS (SecurityContext ou similar)
+  
+  /// Backend TLS preferido para upgrade mid-stream.
+  /// O padrão é [TlsBackend.tlslite].
+  TlsBackend tlsBackend = TlsBackend.tlslite;
+  
   DateTime clientTz = DateTime.now(); // Placeholder para timezone
   int optionFlag2 = 0;
   double connectTimeout = 0.0;

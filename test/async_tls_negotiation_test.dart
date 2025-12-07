@@ -84,6 +84,11 @@ class _FakeTlsTransport implements tds.AsyncTransportProtocol, AsyncTlsTransport
   }
 
   @override
+  Future<Uint8List> recvAvailable(int maxSize) {
+    throw UnimplementedError('recvAvailable não deve ser chamado nos testes');
+  }
+
+  @override
   Future<int> recvInto(ByteBuffer buffer, {int size = 0, int flags = 0}) {
     throw UnimplementedError('recvInto não deve ser chamado nos testes');
   }
