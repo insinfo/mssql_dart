@@ -8,7 +8,7 @@ import 'tds_base.dart' as tds;
 
 const _tdsHeaderSize = 8;
 
-/// Escritor de fluxos TDS inspirado em `pytds.tds_writer`.
+/// TDS stream writer modeled on `pytds.tds_writer`.
 class TdsWriter {
   TdsWriter({
     required tds.TransportProtocol transport,
@@ -166,7 +166,7 @@ class TdsWriter {
   }
 }
 
-/// Versão assíncrona do escritor de pacotes TDS.
+/// Asynchronous TDS packet writer.
 class AsyncTdsWriter {
   AsyncTdsWriter({
     required tds.AsyncTransportProtocol transport,
@@ -185,10 +185,10 @@ class AsyncTdsWriter {
   int _packetType = tds.PacketType.QUERY;
   final Uint8List _scratch = Uint8List(8);
 
-  /// Obtém o transporte atual.
+  /// The current transport.
   tds.AsyncTransportProtocol get transport => _transport;
-  
-  /// Define um novo transporte (usado para TLS upgrade).
+
+  /// Replaces the transport (used for the TLS upgrade).
   void setTransport(tds.AsyncTransportProtocol value) {
     _transport = value;
   }
@@ -313,10 +313,19 @@ class AsyncTdsWriter {
 
   Future<void> flush() => _writePacket(finalPacket: true);
 
+  /// Sets the RESETCONNECTION bit (0x08) on the next packet written; reverts
+  /// to `false` after it.
+  bool resetConnection = false;
+
   Future<void> _writePacket({required bool finalPacket}) async {
     final header = ByteData(_tdsHeaderSize);
     header.setUint8(0, _packetType);
-    header.setUint8(1, finalPacket ? 1 : 0);
+    var status = finalPacket ? 1 : 0;
+    if (resetConnection) {
+      status |= 0x08;
+      resetConnection = false;
+    }
+    header.setUint8(1, status);
     header.setUint16(2, _pos, Endian.big);
     header.setUint16(4, 0, Endian.big);
     header.setUint8(6, _packetNo);

@@ -3,16 +3,16 @@ import 'tls_transport.dart';
 import 'encrypted_socket.dart';
 import 'open_ssl_encrypted_socket.dart';
 
-/// Abstração de provedor TLS (handshake via PRELOGIN + streaming).
+/// TLS provider abstraction (handshake over PRELOGIN, then streaming).
 abstract class TlsProvider {
-  /// Identificador legível do backend.
+  /// Human-readable backend identifier.
   String get id;
 
-  /// Estabelece o transporte TLS encapsulado.
+  /// Establishes the encapsulated TLS transport.
   Future<EncryptedTransport> establish(TlsChannelContext context);
 }
 
-/// Provider baseado no engine puro Dart (tlslite).
+/// Provider backed by the pure Dart engine (tlslite).
 class PureDartTlsProvider implements TlsProvider {
   const PureDartTlsProvider();
 
@@ -25,7 +25,7 @@ class PureDartTlsProvider implements TlsProvider {
   }
 }
 
-/// Provider baseado em OpenSSL via FFI.
+/// Provider backed by OpenSSL via FFI.
 class OpenSslTlsProvider implements TlsProvider {
   const OpenSslTlsProvider();
 
@@ -37,24 +37,18 @@ class OpenSslTlsProvider implements TlsProvider {
     return OpenSslEncryptedSocket.establish(context);
   }
 
-  /// Verifica se as bibliotecas OpenSSL podem ser carregadas no ambiente.
+  /// Whether the OpenSSL libraries can be loaded in this environment.
   static Future<bool> isAvailable() {
     return OpenSslEncryptedSocket.isAvailable();
   }
 }
 
-/// Resolve um provider a partir do backend configurado.
+/// Resolves the provider for the configured backend.
 Future<TlsProvider> resolveProvider(tds.TlsBackend backend) async {
   switch (backend) {
     case tds.TlsBackend.openSsl:
       return const OpenSslTlsProvider();
     case tds.TlsBackend.tlslite:
       return const PureDartTlsProvider();
-    case tds.TlsBackend.dartSecureSocket:
-      // Não suporta upgrade mid-stream.
-      throw tds.OperationalError(
-        'TlsBackend.dartSecureSocket não suporta upgrade TLS mid-stream. '
-        'Use encrypt=true para TLS-first ou selecione pureDart/openSsl.',
-      );
   }
 }

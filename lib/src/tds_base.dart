@@ -1,18 +1,17 @@
 /// tds_base.dart
 ///
-/// Várias definições internas para o protocolo TDS.
-/// Adaptado a partir do código Python original (pytds.tds_base).
-/// 
-/// Esta implementação define constantes de versões, tokens, flags, funções utilitárias,
-/// classes de exceção e estruturas de dados usadas internamente pela biblioteca.
+/// Internal definitions for the TDS protocol.
+/// Adapted from the original Python code (pytds.tds_base).
+///
+/// Defines version constants, tokens, flags, utility functions, exception
+/// classes and data structures used internally by the library.
 
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:galileo_utf/galileo_utf.dart';
-import 'package:tuple/tuple.dart';
+import 'collate.dart' show encodeUtf16le;
 
 // -----------------------------------------------------------------------------
 // TDS Protocol Versions
@@ -26,8 +25,8 @@ const int TDS73 = TDS73A;
 const int TDS73B = 0x730B0003;
 const int TDS74 = 0x74000004;
 
-// Funções para verificar a versão do TDS.
-// Assume-se que a classe [TdsSessionContract] (definida em outro módulo) possua o campo tdsVersion.
+// Functions that check the TDS version.
+// [TdsSessionContract] exposes the session's tdsVersion.
 abstract class TdsSessionContract {
   int get tdsVersion;
 }
@@ -80,9 +79,9 @@ const int TDS_ODBC_OFF = 0;
 const int TDS_USER_NORMAL = 0; // SQL Server login
 const int TDS_INIT_LANG_REQUIRED = 0x01;
 const int TDS_ODBC_ON = 0x02;
-const int TDS_TRANSACTION_BOUNDARY71 = 0x04; // removido no TDS 7.2
-const int TDS_CACHE_CONNECT71 = 0x08; // removido no TDS 7.2
-const int TDS_USER_SERVER = 0x10; // reservado
+const int TDS_TRANSACTION_BOUNDARY71 = 0x04; // removed in TDS 7.2
+const int TDS_CACHE_CONNECT71 = 0x08; // removed in TDS 7.2
+const int TDS_USER_SERVER = 0x10; // reserved
 const int TDS_USER_REMUSER = 0x20; // DQ login
 const int TDS_USER_SQLREPL = 0x40; // replication login
 const int TDS_INTEGRATED_SECURITY_ON = 0x80;
@@ -196,6 +195,7 @@ const int TDS_DONE_INXACT = 0x04; // transaction in progress
 const int TDS_DONE_PROC = 0x08; // results from a stored procedure
 const int TDS_DONE_COUNT = 0x10; // count field is valid
 const int TDS_DONE_CANCELLED = 0x20; // attention command (cancel)
+const int TDS_DONE_ATTN = TDS_DONE_CANCELLED; // ATTENTION acknowledgment
 const int TDS_DONE_EVENT = 0x40; // event notification
 const int TDS_DONE_SRVERROR = 0x100; // SQL Server error
 
@@ -307,7 +307,13 @@ const int TDS_QUERYING = 1;
 const int TDS_PENDING = 2;
 const int TDS_READING = 3;
 const int TDS_DEAD = 4;
-final List<String> stateNames = ["IDLE", "QUERYING", "PENDING", "READING", "DEAD"];
+final List<String> stateNames = [
+  "IDLE",
+  "QUERYING",
+  "PENDING",
+  "READING",
+  "DEAD"
+];
 
 const int TDS_ENCRYPTION_OFF = 0;
 const int TDS_ENCRYPTION_REQUEST = 1;
@@ -330,7 +336,7 @@ class PreLoginToken {
 
 class PreLoginEnc {
   static const int ENCRYPT_OFF = 0; // Encryption available but off
-  static const int ENCRYPT_ON = 1;  // Encryption available and on
+  static const int ENCRYPT_ON = 1; // Encryption available and on
   static const int ENCRYPT_NOT_SUP = 2; // Encryption not available
   static const int ENCRYPT_REQ = 3; // Encryption required
 }
@@ -368,8 +374,9 @@ mixin CommonEqualityMixin {
 // Utility Functions
 // -----------------------------------------------------------------------------
 
-/// Itera sobre pedaços de bytes (chunks) e os decodifica usando o [codec].
-Iterable<String> iterdecode(Iterable<List<int>> iterable, Encoding codec) sync* {
+/// Iterates over byte chunks and decodes them with [codec].
+Iterable<String> iterdecode(
+    Iterable<List<int>> iterable, Encoding codec) sync* {
   var decoder = codec.decoder;
   for (var chunk in iterable) {
     yield decoder.convert(chunk);
@@ -377,13 +384,13 @@ Iterable<String> iterdecode(Iterable<List<int>> iterable, Encoding codec) sync* 
   yield decoder.convert([]);
 }
 
-/// Converte a entrada em string. Se for uma lista de bytes, decodifica com UTF-8.
+/// Converts the input to a string, decoding byte lists as UTF-8.
 String forceUnicode(dynamic s) {
   if (s is List<int>) {
     try {
       return utf8.decode(s);
     } catch (e) {
-      throw DatabaseError(e.toString());
+      throw DatabaseException(e.toString());
     }
   } else if (s is String) {
     return s;
@@ -392,7 +399,7 @@ String forceUnicode(dynamic s) {
   }
 }
 
-/// Cita um identificador conforme as regras do MSSQL.
+/// Quotes an identifier according to MSSQL rules.
 String tdsQuoteId(String ident) {
   return "[${ident.replaceAll("]", "]]")}]";
 }
@@ -412,16 +419,16 @@ const Set<int> integrityErrors = {
   2627,
 };
 
-/// Função identidade para valores (equivalente a ord() em Python).
+/// Identity function for values (equivalent to Python's ord()).
 int myOrd(dynamic val) => val;
 
-/// Junta uma lista de listas de inteiros (byte arrays) em um único array.
+/// Joins a list of byte arrays into a single array.
 List<int> joinByteArrays(Iterable<List<int>> ba) {
   return ba.expand((element) => element).toList();
 }
 
 // -----------------------------------------------------------------------------
-// Exceções e Hierarquia de Erros
+// Exceptions and error hierarchy
 // -----------------------------------------------------------------------------
 class Warning implements Exception {
   final String message;
@@ -430,20 +437,29 @@ class Warning implements Exception {
   String toString() => "Warning: $message";
 }
 
-class Error implements Exception {
+/// Base class of all driver exceptions.
+class MssqlException implements Exception {
   final String message;
-  Error(this.message);
+  MssqlException(this.message);
   @override
-  String toString() => "Error: $message";
+  String toString() => "$runtimeType: $message";
 }
 
-class InterfaceError extends Error {
-  InterfaceError(String message) : super(message);
+/// Incorrect API usage or a client-side failure.
+///
+/// For example: closed connection, closed cursor, invalid parameter, or a
+/// response that violates the protocol.
+class InterfaceException extends MssqlException {
+  InterfaceException(String message) : super(message);
 }
 
 typedef TimeoutError = TimeoutException;
 
-class DatabaseError extends Error {
+/// Error reported by the server.
+///
+/// [number], [severity], [state], [line] and [procName] come from the SQL
+/// Server message; [number] is 0 for errors raised by the driver itself.
+class DatabaseException extends MssqlException {
   int msgNo = 0;
   String text;
   String srvName = "";
@@ -453,11 +469,13 @@ class DatabaseError extends Error {
   int state = 0;
   int line = 0;
 
-  DatabaseError(String message, [dynamic exc])
+  DatabaseException(String message, [dynamic exc])
       : text = message,
         super(message);
 
+  @override
   String get message {
+    if (number == 0) return text;
     if (procName.isNotEmpty) {
       return "SQL Server message $number, severity $severity, state $state, procedure $procName, line $line:\n$text";
     } else {
@@ -466,36 +484,76 @@ class DatabaseError extends Error {
   }
 }
 
-class ClosedConnectionError extends InterfaceError {
-  ClosedConnectionError() : super("Server closed connection");
+/// The connection was closed (by the server, by the network or after a
+/// protocol error).
+class ClosedConnectionException extends InterfaceException {
+  ClosedConnectionException() : super("Server closed connection");
 }
 
-class DataError extends Error {
-  DataError(String message) : super(message);
+/// A value that cannot be converted to the SQL Server type.
+class DataException extends MssqlException {
+  DataException(String message) : super(message);
 }
 
-class OperationalError extends DatabaseError {
-  OperationalError(String message) : super(message);
+/// Connection, TLS, login or timeout failure, or an operational server
+/// error.
+class OperationalException extends DatabaseException {
+  OperationalException(String message) : super(message);
 }
 
-class LoginError extends OperationalError {
-  LoginError(String message) : super(message);
+/// The command was cancelled before it finished, by
+/// `MssqlConnection.cancel` or by a timeout ([MssqlTimeoutException]).
+///
+/// The server acknowledged the cancellation (ATTENTION) and the connection
+/// remains usable. An open transaction stays open: SQL Server does not roll
+/// it back because of the cancellation.
+class MssqlCancelledException extends OperationalException {
+  MssqlCancelledException([String message = 'Command cancelled'])
+      : super(message);
 }
 
-class IntegrityError extends DatabaseError {
-  IntegrityError(String message) : super(message);
+/// The command exceeded its time limit (`timeout` or
+/// `MssqlConnection.commandTimeout`) and was cancelled.
+///
+/// If the server does not acknowledge the cancellation in time, the
+/// connection is closed and [connectionClosed] is `true`.
+class MssqlTimeoutException extends MssqlCancelledException {
+  MssqlTimeoutException(this.timeout, {this.connectionClosed = false})
+      : super(connectionClosed
+            ? 'Timed out ($timeout); the server did not acknowledge the '
+                'cancellation and the connection was closed'
+            : 'Timed out ($timeout); command cancelled');
+
+  /// The time limit that expired.
+  final Duration timeout;
+
+  /// Whether the connection had to be closed.
+  final bool connectionClosed;
 }
 
-class InternalError extends DatabaseError {
-  InternalError(String message) : super(message);
+/// Login rejected by the server.
+class LoginException extends OperationalException {
+  LoginException(String message) : super(message);
 }
 
-class ProgrammingError extends DatabaseError {
-  ProgrammingError(String message) : super(message);
+/// Primary key, unique, foreign key or constraint violation.
+class IntegrityException extends DatabaseException {
+  IntegrityException(String message) : super(message);
 }
 
-class NotSupportedError extends DatabaseError {
-  NotSupportedError(String message) : super(message);
+/// Internal server error.
+class InternalException extends DatabaseException {
+  InternalException(String message) : super(message);
+}
+
+/// Error in the SQL: syntax, missing object, permission.
+class ProgrammingException extends DatabaseException {
+  ProgrammingException(String message) : super(message);
+}
+
+/// Feature or data type not yet supported by the driver.
+class NotSupportedException extends DatabaseException {
+  NotSupportedException(String message) : super(message);
 }
 
 // -----------------------------------------------------------------------------
@@ -535,22 +593,45 @@ final DBAPITypeObject BINARY = DBAPITypeObject([
   BIGBINARYTYPE,
 ]);
 final DBAPITypeObject NUMBER = DBAPITypeObject([
-  BITTYPE, BITNTYPE, INT1TYPE, INT2TYPE, INT4TYPE, INT8TYPE, INTNTYPE, FLT4TYPE, FLT8TYPE, FLTNTYPE,
+  BITTYPE,
+  BITNTYPE,
+  INT1TYPE,
+  INT2TYPE,
+  INT4TYPE,
+  INT8TYPE,
+  INTNTYPE,
+  FLT4TYPE,
+  FLT8TYPE,
+  FLTNTYPE,
 ]);
 final DBAPITypeObject DATETIME = DBAPITypeObject([
-  DATETIMETYPE, DATETIM4TYPE, DATETIMNTYPE,
+  DATETIMETYPE,
+  DATETIM4TYPE,
+  DATETIMNTYPE,
 ]);
 final DBAPITypeObject DECIMAL = DBAPITypeObject([
-  MONEYTYPE, MONEY4TYPE, MONEYNTYPE, NUMERICNTYPE, DECIMALNTYPE,
+  MONEYTYPE,
+  MONEY4TYPE,
+  MONEYNTYPE,
+  NUMERICNTYPE,
+  DECIMALNTYPE,
 ]);
 final DBAPITypeObject ROWID = DBAPITypeObject([]);
 
 // Non-standard but useful type objects
 final DBAPITypeObject INTEGER = DBAPITypeObject([
-  BITTYPE, BITNTYPE, INT1TYPE, INT2TYPE, INT4TYPE, INT8TYPE, INTNTYPE,
+  BITTYPE,
+  BITNTYPE,
+  INT1TYPE,
+  INT2TYPE,
+  INT4TYPE,
+  INT8TYPE,
+  INTNTYPE,
 ]);
 final DBAPITypeObject REAL = DBAPITypeObject([
-  FLT4TYPE, FLT8TYPE, FLTNTYPE,
+  FLT4TYPE,
+  FLT8TYPE,
+  FLTNTYPE,
 ]);
 final DBAPITypeObject XML = DBAPITypeObject([XMLTYPE]);
 
@@ -566,35 +647,38 @@ class InternalProc {
   String toString() => name;
 }
 
-final InternalProc SP_EXECUTESQL = InternalProc(TDS_SP_EXECUTESQL, "sp_executesql");
+final InternalProc SP_EXECUTESQL =
+    InternalProc(TDS_SP_EXECUTESQL, "sp_executesql");
 final InternalProc SP_PREPARE = InternalProc(TDS_SP_PREPARE, "sp_prepare");
 final InternalProc SP_EXECUTE = InternalProc(TDS_SP_EXECUTE, "sp_execute");
 
 // -----------------------------------------------------------------------------
-// Funções de Leitura de Dados
+// Data reading functions
 // -----------------------------------------------------------------------------
 
-/// Lê exatamente [size] bytes do stream [stm] e ignora-os.
-/// Se EOF for alcançado antes, lança ClosedConnectionError.
+/// Reads exactly [size] bytes from [stm] and discards them.
+///
+/// Throws [ClosedConnectionException] if EOF is reached first.
 void skipall(TransportProtocol stm, int size) {
   final res = stm.recv(size);
   if (res.length == size) {
     return;
   }
   if (res.isEmpty) {
-    throw ClosedConnectionError();
+    throw ClosedConnectionException();
   }
   var left = size - res.length;
   while (left > 0) {
     final buf = stm.recv(left);
     if (buf.isEmpty) {
-      throw ClosedConnectionError();
+      throw ClosedConnectionException();
     }
     left -= buf.length;
   }
 }
 
-/// Retorna um Iterable que gera pedaços (chunks) de [size] bytes lidos do stream [stm].
+/// Returns an iterable of chunks that together hold [size] bytes read from
+/// [stm].
 Iterable<List<int>> readChunks(TransportProtocol stm, int size) sync* {
   if (size == 0) {
     yield <int>[];
@@ -602,49 +686,50 @@ Iterable<List<int>> readChunks(TransportProtocol stm, int size) sync* {
   }
   final res = stm.recv(size);
   if (res.isEmpty) {
-    throw ClosedConnectionError();
+    throw ClosedConnectionException();
   }
   yield res;
   var left = size - res.length;
   while (left > 0) {
     final buf = stm.recv(left);
     if (buf.isEmpty) {
-      throw ClosedConnectionError();
+      throw ClosedConnectionException();
     }
     yield buf;
     left -= buf.length;
   }
 }
 
-/// Lê exatamente [size] bytes do stream [stm].
+/// Reads exactly [size] bytes from [stm].
 List<int> readall(TransportProtocol stm, int size) {
   return joinByteArrays(readChunks(stm, size));
 }
 
-/// Uma versão “rápida” de readall para dados pequenos.
-/// Retorna uma tupla com a lista de bytes e um offset (0 neste placeholder).
-Tuple2<List<int>, int> readallFast(TransportProtocol stm, int size) {
+/// A "fast" version of [readall] for small data.
+///
+/// Returns a tuple with the bytes and an offset (always 0 here).
+(List<int>, int) readallFast(TransportProtocol stm, int size) {
   var buf = stm.recv(size);
   if (buf.length >= size) {
-    return Tuple2(buf, 0);
+    return (buf, 0);
   }
 
   final aggregated = List<int>.from(buf);
   while (aggregated.length < size) {
     final chunk = stm.recv(size - aggregated.length);
     if (chunk.isEmpty) {
-      throw ClosedConnectionError();
+      throw ClosedConnectionException();
     }
     aggregated.addAll(chunk);
   }
-  return Tuple2(aggregated, 0);
+  return (aggregated, 0);
 }
 
-/// Retorna o total de segundos de um Duration.
+/// Returns the total seconds of a [Duration].
 int totalSeconds(Duration td) => td.inSeconds;
 
 // -----------------------------------------------------------------------------
-// Classes Param e Column
+// Param and Column classes
 // -----------------------------------------------------------------------------
 class Param {
   String name;
@@ -673,7 +758,7 @@ class Column with CommonEqualityMixin {
   static const int fComputed = 0x20;
 
   dynamic chooseSerializer(dynamic typeFactory, dynamic collation) {
-    // Placeholder: implementar conforme a lógica do typeFactory.
+    // Placeholder: implement according to the typeFactory logic.
     return typeFactory.serializerByType(sqlType: type, collation: collation);
   }
 
@@ -691,7 +776,7 @@ class Column with CommonEqualityMixin {
 }
 
 // -----------------------------------------------------------------------------
-// Protocols: Transport, LoadBalancer e Auth
+// Protocols: Transport, LoadBalancer and Auth
 // -----------------------------------------------------------------------------
 abstract class TransportProtocol {
   bool isConnected();
@@ -725,9 +810,9 @@ abstract class AuthProtocol {
 }
 
 // -----------------------------------------------------------------------------
-// Estruturas para processamento de headers e outros (usando ByteData)
+// Structures for header processing and more (using ByteData)
 // -----------------------------------------------------------------------------
-final ByteData header = ByteData(8); // conforme a struct ">BBHHBx" (8 bytes)
+final ByteData header = ByteData(8); // matches the struct ">BBHHBx" (8 bytes)
 final ByteData byteData1 = ByteData(1);
 final ByteData smallintLe = ByteData(2);
 final ByteData smallintBe = ByteData(2);
@@ -756,9 +841,10 @@ class Output {
         throw ArgumentError("Output type cannot be autodetected");
       }
     } else if (paramType is Type && value != null) {
-      // Verificação simples; ajuste conforme necessário.
+      // Simple check; adjust as needed.
       if (value != defaultValue && value.runtimeType != paramType) {
-        throw ArgumentError("Value should match paramType, value is $value, paramType is $paramType");
+        throw ArgumentError(
+            "Value should match paramType, value is $value, paramType is $paramType");
       }
     }
     _type = paramType;
@@ -770,13 +856,14 @@ class Output {
 }
 
 class _Default {}
+
 final defaultValue = _Default();
 
 // -----------------------------------------------------------------------------
-// tds7_crypt_pass: "Mangle" a senha conforme as regras TDS.
+// tds7_crypt_pass: mangles the password according to the TDS rules.
 // -----------------------------------------------------------------------------
 List<int> tds7CryptPass(String password) {
-  final mangled = List<int>.from(encodeUtf16le(password, false));
+  final mangled = encodeUtf16le(password);
   for (int i = 0; i < mangled.length; i++) {
     final ch = mangled[i];
     mangled[i] = (((ch << 4) & 0xFF) | (ch >> 4)) ^ 0xA5;
@@ -788,15 +875,15 @@ List<int> tds7CryptPass(String password) {
 // _TdsLogin Class
 // -----------------------------------------------------------------------------
 
-/// Backend TLS preferido pelo cliente.
+/// TLS backend preferred by the client.
 enum TlsBackend {
-  /// Usa o SecureSocket nativo do Dart (requer conexão TLS-first).
-  dartSecureSocket,
-  
-  /// Usa OpenSSL via FFI (permite upgrade mid-stream).
+  /// System OpenSSL via FFI.
+  ///
+  /// Does not validate the server certificate, so it requires
+  /// `trustServerCertificate: true`.
   openSsl,
-  
-  /// Usa implementação pura Dart do tlslite (permite upgrade mid-stream).
+
+  /// Pure-Dart tlslite (default), with chain and host name validation.
   tlslite,
 }
 
@@ -823,13 +910,16 @@ class TdsLogin {
   bool validateHost = true;
   bool encLoginOnly = false;
   int encFlag = 0;
-  dynamic tlsCtx; // Contexto TLS (SecurityContext ou similar)
-  
-  /// Backend TLS preferido para upgrade mid-stream.
-  /// O padrão é [TlsBackend.tlslite].
+
+  /// Accepts any server certificate (the channel stays encrypted).
+  bool trustServerCertificate = false;
+
+  /// Preferred TLS backend for the mid-stream upgrade.
+  ///
+  /// Defaults to [TlsBackend.tlslite].
   TlsBackend tlsBackend = TlsBackend.tlslite;
-  
-  DateTime clientTz = DateTime.now(); // Placeholder para timezone
+
+  DateTime clientTz = DateTime.now(); // Timezone placeholder
   int optionFlag2 = 0;
   double connectTimeout = 0.0;
   double? queryTimeout;
@@ -838,11 +928,12 @@ class TdsLogin {
   LoadBalancer? loadBalancer;
   bool bytesToUnicode = false;
   AuthProtocol? auth;
-  Queue<Tuple3<dynamic, int?, String>> servers = Queue<Tuple3<dynamic, int?, String>>();
+  Queue<Tuple3<dynamic, int?, String>> servers =
+      Queue<Tuple3<dynamic, int?, String>>();
   int serverEncFlag = 0;
 }
 
-// Helper Tuple3 para a fila de servidores.
+// Tuple3 helper for the server queue.
 class Tuple3<T1, T2, T3> {
   final T1 item1;
   final T2 item2;
@@ -865,17 +956,23 @@ class TdsEnv {
 // -----------------------------------------------------------------------------
 // _create_exception_by_message
 // -----------------------------------------------------------------------------
-DatabaseError createExceptionByMessage(Message msg, {String? customErrorMsg}) {
+/// Login rejected: credentials, locked/expired account, inaccessible database.
+const Set<int> _loginErrors = {4060, 18452, 18456, 18486, 18487, 18488};
+
+DatabaseException createExceptionByMessage(Message msg,
+    {String? customErrorMsg}) {
   final msgNo = msg["msgno"] as int? ?? 0;
   final errorMsg = customErrorMsg ?? (msg["message"] as String? ?? "");
 
-  DatabaseError ex;
+  DatabaseException ex;
   if (progErrors.contains(msgNo)) {
-    ex = ProgrammingError(errorMsg);
+    ex = ProgrammingException(errorMsg);
   } else if (integrityErrors.contains(msgNo)) {
-    ex = IntegrityError(errorMsg);
+    ex = IntegrityException(errorMsg);
+  } else if (_loginErrors.contains(msgNo)) {
+    ex = LoginException(errorMsg);
   } else {
-    ex = OperationalError(errorMsg);
+    ex = OperationalException(errorMsg);
   }
 
   ex.msgNo = msgNo;
@@ -889,7 +986,7 @@ DatabaseError createExceptionByMessage(Message msg, {String? customErrorMsg}) {
   return ex;
 }
 
-// Message e Route são representados como Map<String, dynamic>
+// Message and Route are represented as Map<String, dynamic>
 typedef Message = Map<String, dynamic>;
 typedef Route = Map<String, dynamic>;
 
@@ -899,6 +996,6 @@ typedef Route = Map<String, dynamic>;
 class Results {
   List<Column> columns = [];
   int rowCount = 0;
-  // Descrição dos resultados (lista de listas, cada coluna com seus metadados)
+  // Result description (list of lists, each column with its metadata)
   List<List<dynamic>> description = [];
 }

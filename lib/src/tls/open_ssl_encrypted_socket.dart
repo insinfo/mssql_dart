@@ -8,7 +8,8 @@ import '../tds_base.dart' as tds;
 import 'tls_io_bridge.dart';
 import 'tls_transport.dart';
 
-/// Transporte TLS baseado em OpenSSL FFI usando o mesmo fluxo encapsulado via PRELOGIN.
+/// TLS transport backed by OpenSSL FFI, using the same PRELOGIN-encapsulated
+/// handshake flow.
 class OpenSslEncryptedSocket implements EncryptedTransport {
   OpenSslEncryptedSocket._({
     required this.underlyingTransport,
@@ -24,7 +25,7 @@ class OpenSslEncryptedSocket implements EncryptedTransport {
 
   static Future<bool> isAvailable() async {
     try {
-      // Tenta carregar as libs; falha se não encontrar.
+      // Try to load the libraries; throws if they are not found.
       OpenSslBindings.load();
       return true;
     } catch (_) {
@@ -32,7 +33,7 @@ class OpenSslEncryptedSocket implements EncryptedTransport {
     }
   }
 
-  /// Estabelece o handshake TLS encapsulado via PRELOGIN.
+  /// Performs the TLS handshake encapsulated in PRELOGIN packets.
   static Future<OpenSslEncryptedSocket> establish(
     TlsChannelContext context,
   ) async {
@@ -53,10 +54,10 @@ class OpenSslEncryptedSocket implements EncryptedTransport {
       },
     );
 
-    // Completa handshake.
+    // Complete the handshake.
     await tlsEngine.ensureHandshakeCompleted();
 
-    // Passa para modo streaming: PRELOGIN -> TLS direto.
+    // Switch to streaming mode: PRELOGIN -> direct TLS.
     bridge.enterStreamingMode();
 
     return OpenSslEncryptedSocket._(
@@ -94,7 +95,7 @@ class OpenSslEncryptedSocket implements EncryptedTransport {
     }
     final chunk = await _tls.recv(size);
     if (chunk.isEmpty) {
-      throw tds.ClosedConnectionError();
+      throw tds.ClosedConnectionException();
     }
     return chunk;
   }
@@ -106,7 +107,7 @@ class OpenSslEncryptedSocket implements EncryptedTransport {
     }
     final chunk = await _tls.recv(maxSize);
     if (chunk.isEmpty) {
-      throw tds.ClosedConnectionError();
+      throw tds.ClosedConnectionException();
     }
     return chunk;
   }

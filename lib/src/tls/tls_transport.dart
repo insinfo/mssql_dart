@@ -1,7 +1,7 @@
 /// tls_transport.dart
 ///
-/// Interface abstrata para transportes TLS que suportam upgrade dinâmico mid-stream.
-/// Portado do pytds/tls.py.
+/// Abstract interface for TLS transports that support a dynamic mid-stream
+/// upgrade. Ported from pytds/tls.py.
 
 import 'dart:async';
 import 'dart:typed_data';
@@ -9,25 +9,26 @@ import 'dart:typed_data';
 import '../tds_base.dart' as tds;
 import 'tls_base.dart';
 
-/// Interface para transportes TLS encriptados.
-/// 
-/// Esta interface abstrai diferentes implementações de TLS (OpenSSL, Pure Dart)
-/// permitindo que o código TDS funcione com qualquer uma delas.
+/// Interface for encrypted TLS transports.
+///
+/// Abstracts the different TLS implementations (OpenSSL, pure Dart) so the
+/// TDS code works with any of them.
 abstract class EncryptedTransport implements tds.AsyncTransportProtocol {
-  /// O transporte subjacente (não encriptado).
+  /// The underlying (unencrypted) transport.
   tds.AsyncTransportProtocol get underlyingTransport;
-  
-  /// Fecha a conexão TLS e libera recursos.
+
+  /// Closes the TLS connection and releases its resources.
   Future<void> shutdown();
 }
 
-/// Callback para notificar mudanças de transporte.
-typedef TransportChangeCallback = void Function(tds.AsyncTransportProtocol newTransport);
+/// Callback notified when the transport changes.
+typedef TransportChangeCallback = void Function(
+    tds.AsyncTransportProtocol newTransport);
 
-/// Contexto para estabelecer canal TLS.
-/// 
-/// Contém todas as informações necessárias para realizar o handshake TLS
-/// no estilo do TDS (dados encapsulados em pacotes PRELOGIN).
+/// Context for establishing a TLS channel.
+///
+/// Holds everything needed to perform the TDS-style TLS handshake (data
+/// encapsulated in PRELOGIN packets).
 class TlsChannelContext {
   TlsChannelContext({
     required this.transport,
@@ -36,39 +37,35 @@ class TlsChannelContext {
     required this.sendPreloginPacket,
     required this.receivePreloginPacket,
     this.onTransportChanged,
-    this.tlsContext,
   });
-  
-  /// Transporte atual (plaintext).
-  final tds.AsyncTransportProtocol transport;
-  
-  /// Nome do servidor para validação de certificado.
-  final String serverName;
-  
-  /// Configuração TLS.
-  final TlsConfig tlsConfig;
-  
-  /// Função para enviar dados encapsulados em pacote PRELOGIN.
-  final Future<void> Function(Uint8List data) sendPreloginPacket;
-  
-  /// Função para receber dados de pacote PRELOGIN.
-  final Future<Uint8List> Function() receivePreloginPacket;
-  
-  /// Callback chamado quando o transporte é alterado.
-  final TransportChangeCallback? onTransportChanged;
 
-  /// Contexto TLS específico do backend (ex.: SecurityContext para OpenSSL).
-  final Object? tlsContext;
+  /// Current (plaintext) transport.
+  final tds.AsyncTransportProtocol transport;
+
+  /// Server name used for certificate validation.
+  final String serverName;
+
+  /// TLS configuration.
+  final TlsConfig tlsConfig;
+
+  /// Sends data encapsulated in a PRELOGIN packet.
+  final Future<void> Function(Uint8List data) sendPreloginPacket;
+
+  /// Receives data from a PRELOGIN packet.
+  final Future<Uint8List> Function() receivePreloginPacket;
+
+  /// Called when the transport is replaced.
+  final TransportChangeCallback? onTransportChanged;
 }
 
-/// Factory para criar transportes TLS baseado no provider configurado.
+/// Factory that creates TLS transports for the configured provider.
 abstract class TlsTransportFactory {
-  /// Cria um transporte TLS encriptado sobre o transporte existente.
-  /// 
-  /// [context] contém todas as informações necessárias para o handshake.
-  /// Retorna o novo transporte encriptado.
+  /// Creates an encrypted TLS transport on top of the existing transport.
+  ///
+  /// [context] holds everything needed for the handshake. Returns the new
+  /// encrypted transport.
   Future<EncryptedTransport> establishChannel(TlsChannelContext context);
-  
-  /// Backend suportado por esta factory.
+
+  /// Backend supported by this factory.
   TlsBackend get backend;
 }

@@ -96,14 +96,21 @@ class AsyncTdsSocket {
   void clearRowBuffer() => _mainSession.clearRowBuffer();
 
   AsyncSessionLink get mainSession => _mainSession;
-  bool get isConnected => _isConnected;
+
+  /// Whether the connection is usable: `false` after [close], after the
+  /// socket drops, or after an error that desynchronized the protocol.
+  bool get isConnected =>
+      _isConnected &&
+      _mainSession.state != tds.TDS_DEAD &&
+      _transport.isConnected;
   bool get marsEnabled => _marsEnabled;
 
   AsyncTdsSession cursor() {
     final session = _mainSession;
     if (session is! AsyncTdsSession) {
-      throw tds.InterfaceError(
-        'Cursor assíncrono disponível apenas quando a sessão real é AsyncTdsSession.',
+      throw tds.InterfaceException(
+        'An async cursor is available only when the underlying session is an '
+        'AsyncTdsSession.',
       );
     }
     return session;
@@ -126,10 +133,14 @@ class AsyncTdsSocket {
     _syncSessionBuffers();
     _refreshTypes();
     if (_marsEnabled) {
-      throw UnimplementedError('MARS ainda não foi portado para Dart');
+      throw UnimplementedError('MARS has not been ported to Dart yet');
     }
     _isConnected = true;
-    if (_login.database.isNotEmpty && env.database != _login.database) {
+    // On a redirect the server only expects the client to disconnect and log
+    // in again at the target.
+    if (route == null &&
+        _login.database.isNotEmpty &&
+        env.database != _login.database) {
       final sql = 'use ' + tds.tdsQuoteId(_login.database);
       await runSerial((session) async {
         await session.submitPlainQuery(sql);
@@ -138,8 +149,9 @@ class AsyncTdsSocket {
     }
     return route;
   }
-  /// Serializa o uso do [_mainSession], garantindo que apenas uma operação
-  /// TDS seja executada por vez (importante para o modo assíncrono).
+
+  /// Serializes access to the main session, ensuring that only one TDS
+  /// operation runs at a time (important in async mode).
   Future<T> runSerial<T>(Future<T> Function(AsyncSessionLink session) action) {
     final session = _mainSession;
     if (session is AsyncTdsSession) {
@@ -164,7 +176,7 @@ class AsyncTdsSocket {
 
   void closeAllMarsSessions() {
     if (_marsManager != null) {
-      throw UnimplementedError('SmpManager ainda não foi portado');
+      throw UnimplementedError('SmpManager has not been ported yet');
     }
   }
 

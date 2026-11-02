@@ -1,0 +1,10 @@
+# Same exclusions as .gitignore (.pubignore replaces it) plus development material.
+.dart_tool/
+build/
+pubspec_overrides.yaml
+pubspec.lock
+pytds/
+cpp/
+benchmark/
+.github/
+TODO.md

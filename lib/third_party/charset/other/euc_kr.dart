@@ -34,7 +34,9 @@ class EucKREncoder extends Converter<String, List<int>> {
       if (i < 0x80) {
         bits.add(i);
       } else {
-        int code = utf8ToEucKr[i] ?? 0;
+        // mssql_dart: as tabelas do pacote original estão com os nomes
+        // trocados; eucKrToUtf8 mapeia Unicode -> EUC-KR (CP949).
+        int code = eucKrToUtf8[i] ?? 0;
         if (code > 0) {
           // bits.add(code ~/ 190 + 0x81);
           // bits.add(code % 190 + 0x41);
@@ -64,7 +66,8 @@ class EucKRDecoder extends Converter<List<int>, String> {
         if (pointer >= 0x41 && pointer <= 0xfe) {
           //int code = (leadPointer - 0x81) * 190 + (pointer - 0x41);
           int code = (leadPointer << 8) + pointer;
-          final charCode = code < 0x80 ? code : eucKrToUtf8[code];
+          // mssql_dart: utf8ToEucKr mapeia EUC-KR (CP949) -> Unicode.
+          final charCode = code < 0x80 ? code : utf8ToEucKr[code];
           if (charCode == null && !_allowInvalid) {
             throw FormatException('Unfinished Euc-KR octet sequence', input, i);
           } else {

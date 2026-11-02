@@ -1,8 +1,8 @@
 /// Constants for Locale IDs (LCIDs).
 ///
-/// Baseado no código original do LibForensics, este arquivo define os LCIDs
-/// e um mapa com os nomes descritivos dos idiomas.
- 
+/// Based on the original LibForensics code, this file defines the LCIDs and
+/// a map of descriptive language names.
+
 // LCID constants
 const int LANGID_AFRIKAANS = 1078;
 const int LANGID_ALBANIAN = 1052;
@@ -209,7 +209,7 @@ const int LANGID_YIDDISH = 1085;
 const int LANGID_YORUBA = 1130;
 const int LANGID_ZULU = 1077;
 
-// Mapeamento dos LCIDs para nomes descritivos.
+// Maps LCIDs to descriptive names.
 const Map<int, String> langIdNames = {
   LANGID_AFRIKAANS: "African",
   LANGID_ALBANIAN: "Albanian",
@@ -316,7 +316,7 @@ const Map<int, String> langIdNames = {
   LANGID_KIRGHIZ: "Kirghiz",
   LANGID_KONKANI: "Konkani",
   LANGID_KOREAN: "Korean",
- // LANGID_KYRGYZ: "Kyrgyz",
+  // LANGID_KYRGYZ: "Kyrgyz",
   LANGID_LANGUAGE_NONE: "No specified",
   LANGID_LAO: "Lao",
   LANGID_LATIN: "Latin",
@@ -380,7 +380,7 @@ const Map<int, String> langIdNames = {
   LANGID_SPANISH_PUERTO_RICO: "Spanish Puerto Rican",
   LANGID_SPANISH_URUGUAY: "Spanish Uruguayan",
   LANGID_SPANISH_VENEZUELA: "Spanish Venezuelan",
- // LANGID_SUTU: "Sutu",
+  // LANGID_SUTU: "Sutu",
   LANGID_SWAHILI: "Swahili",
   LANGID_SWEDISH: "Swedish",
   LANGID_SWEDISH_FINLAND: "Swedish Finnish",

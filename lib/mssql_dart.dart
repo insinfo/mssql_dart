@@ -1,11 +1,31 @@
-library mssql_dart;
+/// Pure Dart asynchronous driver for Microsoft SQL Server.
+///
+/// Start with [MssqlConnection.connect] or, in servers, with [MssqlPool].
+/// The low-level protocol lives in `package:mssql_dart/tds.dart`.
+library;
 
-export 'src/session_link.dart';
-export 'src/async_tds_session.dart';
-export 'src/async_tds_socket.dart';
-export 'src/async_socket_transport.dart';
-export 'src/connect.dart';
-export 'src/async_cursor.dart';
-export 'src/async_db_api.dart';
-export 'src/tls/tls_base.dart' show TlsBackend, TlsConfig;
-
+export 'src/connection.dart' show IsolationLevel, MssqlConnection, MssqlCursor;
+export 'src/placeholders.dart' show PlaceholderIdentifier;
+export 'src/pool.dart' show MssqlPool, MssqlPoolStats;
+export 'src/query_hook.dart' show MssqlQueryEvent, MssqlQueryHook;
+export 'src/result.dart'
+    show MssqlColumn, MssqlProcedureResult, MssqlResult, MssqlRow;
+export 'src/settings.dart' show MssqlConnectionSettings;
+export 'src/sql_parameter.dart' show SqlParameter, SqlParameterKind;
+export 'src/tds_base.dart'
+    show
+        ClosedConnectionException,
+        DataException,
+        DatabaseException,
+        IntegrityException,
+        InterfaceException,
+        InternalException,
+        LoginException,
+        MssqlCancelledException,
+        MssqlException,
+        MssqlTimeoutException,
+        NotSupportedException,
+        OperationalException,
+        ProgrammingException,
+        TlsBackend;
+export 'src/tds_types.dart' show DateTimeOffsetValue, DecimalValue;

@@ -96,3 +96,9 @@
 
 merged_pytds_code.py.txt
 referencias/
+
+# Local port references (not published)
+pytds/
+cpp/
+pubspec_overrides.yaml
+.dart_tool/

@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 
-/// Executa [action] sob um lock baseado em arquivo para impedir que vários
-/// testes de integração usem o SQL Server simultaneamente.
+/// Runs [action] under a file-based lock so that multiple integration tests
+/// do not use SQL Server at the same time.
 Future<T> withSqlServerLock<T>(FutureOr<T> Function() action) async {
   final lock = await _SqlServerTestLock.instance._acquire();
   try {

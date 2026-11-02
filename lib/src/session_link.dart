@@ -4,19 +4,19 @@ import 'tds_base.dart' as tds;
 import 'tds_reader.dart';
 import 'tds_types.dart';
 
-/// Abstração usada para construir sessões TDS reais quando o transporte é criado.
+/// Builds the actual TDS session once the transport has been created.
 typedef SessionBuilder = SessionLink Function(SessionBuildContext context);
 typedef AsyncSessionBuilder = AsyncSessionLink Function(
   AsyncSessionBuildContext context,
 );
 
-/// Função chamada para cada evento relevante da sessão (útil para depuração).
+/// Called for each relevant session event (useful for debugging).
 typedef SessionTraceHook = void Function(
   String event,
   Map<String, Object?> payload,
 );
 
-/// Contexto passado para um [SessionBuilder].
+/// Context passed to a [SessionBuilder].
 class SessionBuildContext {
   final tds.TransportProtocol transport;
   final int bufsize;
@@ -81,8 +81,8 @@ class AsyncSessionBuildContext {
   }) : rowStrategy = rowStrategy ?? defaultRowStrategy;
 }
 
-/// Interface mínima que o `_TdsSocket` precisa da sessão enquanto o restante do
-/// port ainda não está disponível.
+/// Minimal interface that `_TdsSocket` needs from the session while the rest
+/// of the port is not yet available.
 abstract class SessionLink extends tds.TdsSessionContract {
   tds.TransportProtocol get transport;
   int get writerBufferSize;

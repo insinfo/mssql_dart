@@ -1,15 +1,15 @@
-/// Testes focados no backend `OpenSslEncryptedSocket`.
+/// Tests focused on the `OpenSslEncryptedSocket` backend.
 ///
-/// Mantidos em arquivo separado para permitir execução isolada quando
-/// o ambiente possuir OpenSSL configurado para o handshake mid-stream.
-import 'package:mssql_dart/mssql_dart.dart';
+/// Kept in a separate file so they can run in isolation when the
+/// environment has OpenSSL configured for the mid-stream handshake.
+import 'package:mssql_dart/tds.dart';
 import 'package:mssql_dart/src/tls/open_ssl_encrypted_socket.dart';
 import 'package:test/test.dart';
 
 dynamic _field(dynamic row, {String? name, int? index}) {
   if (row is Map<String, dynamic>) {
     if (name == null) {
-      throw ArgumentError('name é obrigatório para linhas baseadas em Map');
+      throw ArgumentError('name is required for Map-based rows');
     }
     return row[name];
   }
@@ -29,11 +29,11 @@ void main() {
     setUpAll(() async {
       final available = await OpenSslEncryptedSocket.isAvailable();
       if (!available) {
-        fail('OpenSSL FFI bindings não estão disponíveis neste ambiente.');
+        fail('OpenSSL FFI bindings are not available in this environment.');
       }
     });
 
-    test('connectAsync executa handshake e SELECT simples', () async {
+    test('connectAsync performs the handshake and a simple SELECT', () async {
       final socket = await connectAsync(
         host: host,
         port: port,
@@ -41,7 +41,7 @@ void main() {
         password: password,
         database: database,
         encrypt: true,
-        validateHost: false,
+        trustServerCertificate: true,
         tlsBackend: TlsBackend.openSsl,
       );
       addTearDown(() => socket.close());
@@ -59,24 +59,24 @@ void main() {
       expect(row, isNotNull);
     });
 
-    test('dbConnectAsync com backend OpenSSL', () async {
-      final conn = await dbConnectAsync(
+    test('dbConnectAsync with the OpenSSL backend', () async {
+      final conn = await MssqlConnection.connect(MssqlConnectionSettings(
         host: host,
         port: port,
-        user: user,
+        username: user,
         password: password,
         database: database,
         encrypt: true,
-        validateHost: false,
+        trustServerCertificate: true,
         tlsBackend: TlsBackend.openSsl,
-      );
+      ));
       addTearDown(() => conn.close());
 
       final cursor = conn.cursor();
       addTearDown(() => cursor.close());
 
       await cursor.execute('SELECT 1 AS value');
-      final rows = await cursor.fetchall();
+      final rows = await cursor.fetchAll();
 
       expect(rows, hasLength(1));
       final value = _field(rows.first, name: 'value', index: 0);

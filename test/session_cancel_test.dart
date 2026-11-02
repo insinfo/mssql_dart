@@ -8,7 +8,7 @@ import 'package:test/test.dart';
 
 void main() {
   group('AsyncTdsSession.cancel', () {
-    test('envia pacote CANCEL', () async {
+    test('sends a CANCEL packet', () async {
       final transport = _FakeAsyncTransport();
       final session = AsyncTdsSession.fromContext(
         AsyncSessionBuildContext(
@@ -60,5 +60,7 @@ class _FakeAsyncTransport implements tds.AsyncTransportProtocol {
   Future<Uint8List> recvAvailable(int maxSize) async => Uint8List(0);
 
   @override
-  Future<int> recvInto(ByteBuffer buffer, {int size = 0, int flags = 0}) async => 0;
+  Future<int> recvInto(ByteBuffer buffer,
+          {int size = 0, int flags = 0}) async =>
+      0;
 }

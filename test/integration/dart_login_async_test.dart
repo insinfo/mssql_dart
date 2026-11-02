@@ -1,5 +1,6 @@
-import 'package:mssql_dart/mssql_dart.dart';
+import 'package:mssql_dart/tds.dart';
 import 'package:test/test.dart';
+import 'test_config.dart';
 
 import 'test_utils.dart';
 
@@ -10,7 +11,7 @@ void main() {
   const user = 'dart';
   const password = 'dart';
 
-  test('connectAsync realiza login básico', () async {
+  test('connectAsync performs a basic login', () async {
     await withSqlServerLock(() async {
       final traces = <String>[];
       late AsyncTdsSocket socket;
@@ -22,7 +23,8 @@ void main() {
           password: password,
           database: database,
           encrypt: true,
-          validateHost: false,
+          cafile: testCa,
+          trustServerCertificate: testTrustServerCertificate,
           bytesToUnicode: true,
           traceHook: (event, payload) {
             traces.add('$event ${payload.toString()}');
@@ -30,7 +32,7 @@ void main() {
         );
       } catch (error) {
         for (final trace in traces) {
-          // Ajuda a diagnosticar onde o login falhou.
+          // Helps diagnose where the login failed.
           // ignore: avoid_print
           print('[TRACE] $trace');
         }
@@ -46,7 +48,7 @@ void main() {
     });
   });
 
-  test('AsyncTdsSocket expõe linhas após processSimpleRequest', () async {
+  test('AsyncTdsSocket exposes rows after processSimpleRequest', () async {
     await withSqlServerLock(() async {
       final socket = await connectAsync(
         host: host,
@@ -55,13 +57,14 @@ void main() {
         password: password,
         database: database,
         encrypt: true,
-        validateHost: false,
+        cafile: testCa,
+        trustServerCertificate: testTrustServerCertificate,
         bytesToUnicode: true,
       );
       try {
         await socket.runSerial((session) async {
           await session
-            .submitPlainQuery('SELECT 10 AS valor UNION ALL SELECT 20');
+              .submitPlainQuery('SELECT 10 AS valor UNION ALL SELECT 20');
           await session.processSimpleRequest();
         });
 

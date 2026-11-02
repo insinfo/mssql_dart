@@ -1,16 +1,17 @@
-/// Testes específicos para o backend `PureDartEncryptedSocket`.
+/// Tests specific to the `PureDartEncryptedSocket` backend.
 ///
-/// Estes cenários exercitam o handshake TLS mid-stream realizado pela
-/// implementação pura em Dart (tlslite) utilizada pelo driver.
-import 'package:mssql_dart/mssql_dart.dart';
+/// These scenarios exercise the mid-stream TLS handshake performed by the
+/// pure Dart implementation (tlslite) used by the driver.
+import 'package:mssql_dart/tds.dart';
 import 'package:test/test.dart';
+import 'test_config.dart';
 
-/// Recupera valores de uma linha retornada pelo driver, seja ela baseada
-/// em `Map<String, dynamic>` ou em listas posicionais.
+/// Reads a value from a row returned by the driver, whether it is a
+/// `Map<String, dynamic>` or a positional list.
 dynamic _field(dynamic row, {String? name, int? index}) {
   if (row is Map<String, dynamic>) {
     if (name == null) {
-      throw ArgumentError('name é obrigatório para linhas baseadas em Map');
+      throw ArgumentError('name is required for Map-based rows');
     }
     return row[name];
   }
@@ -27,7 +28,7 @@ void main() {
   const password = 'dart';
 
   group('Pure Dart TLS mid-stream', () {
-    test('connectAsync executa handshake e SELECT simples', () async {
+    test('connectAsync performs the handshake and a simple SELECT', () async {
       final socket = await connectAsync(
         host: host,
         port: port,
@@ -35,7 +36,8 @@ void main() {
         password: password,
         database: database,
         encrypt: true,
-        validateHost: false,
+        cafile: testCa,
+        trustServerCertificate: testTrustServerCertificate,
         tlsBackend: TlsBackend.tlslite,
       );
       addTearDown(() => socket.close());
@@ -51,47 +53,48 @@ void main() {
       expect(socket.hasBufferedRows, isTrue);
       final row = socket.takeRow();
       expect(row, isNotNull);
-      final currentDb = row is Map<String, dynamic>
-          ? row['current_db']
-          : (row as List).first;
+      final currentDb =
+          row is Map<String, dynamic> ? row['current_db'] : (row as List).first;
       expect(currentDb.toString().toLowerCase(), equals(database));
     });
 
-    test('dbConnectAsync com backend Pure Dart', () async {
-      final conn = await dbConnectAsync(
+    test('dbConnectAsync with the Pure Dart backend', () async {
+      final conn = await MssqlConnection.connect(MssqlConnectionSettings(
         host: host,
         port: port,
-        user: user,
+        username: user,
         password: password,
         database: database,
         encrypt: true,
-        validateHost: false,
+        caFile: testCa,
+        trustServerCertificate: testTrustServerCertificate,
         tlsBackend: TlsBackend.tlslite,
-      );
+      ));
       addTearDown(() => conn.close());
 
       final cursor = conn.cursor();
       addTearDown(() => cursor.close());
 
       await cursor.execute('SELECT 42 AS answer');
-      final rows = await cursor.fetchall();
+      final rows = await cursor.fetchAll();
 
       expect(rows, hasLength(1));
       final answer = _field(rows.first, name: 'answer', index: 0);
       expect(answer, equals(42));
     });
 
-    test('transação completa usando Pure Dart TLS', () async {
-      final conn = await dbConnectAsync(
+    test('full transaction over Pure Dart TLS', () async {
+      final conn = await MssqlConnection.connect(MssqlConnectionSettings(
         host: host,
         port: port,
-        user: user,
+        username: user,
         password: password,
         database: database,
         encrypt: true,
-        validateHost: false,
+        caFile: testCa,
+        trustServerCertificate: testTrustServerCertificate,
         tlsBackend: TlsBackend.tlslite,
-      );
+      ));
       addTearDown(() => conn.close());
 
       final cursor = conn.cursor();
@@ -105,11 +108,12 @@ void main() {
       ''');
 
       await cursor.execute('BEGIN TRANSACTION');
-      await cursor.execute("INSERT INTO #tls_pure_dart VALUES (1, 'pure dart tls')");
+      await cursor
+          .execute("INSERT INTO #tls_pure_dart VALUES (1, 'pure dart tls')");
       await cursor.execute('COMMIT');
 
       await cursor.execute('SELECT * FROM #tls_pure_dart');
-      final rows = await cursor.fetchall();
+      final rows = await cursor.fetchAll();
 
       expect(rows, hasLength(1));
       final firstRow = rows.first;

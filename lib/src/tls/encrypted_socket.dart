@@ -1,10 +1,10 @@
 /// encrypted_socket.dart
 ///
-/// Implementação de socket encriptado para TLS mid-stream.
+/// Encrypted socket implementation for mid-stream TLS.
 /// encrypted_socket.dart
 ///
-/// Implementação de transporte TLS capaz de realizar o handshake
-/// encapsulado do SQL Server (TLS sobre pacotes PRELOGIN).
+/// TLS transport implementation able to perform SQL Server's encapsulated
+/// handshake (TLS over PRELOGIN packets).
 
 import 'dart:async';
 import 'dart:collection';
@@ -16,8 +16,9 @@ import 'package:tlslite/tlslite.dart' as tlslite;
 import '../tds_base.dart' as tds;
 import 'tls_transport.dart';
 import 'tls_io_bridge.dart';
+import 'trust_store.dart';
 
-/// Implementação baseada no tlslite puro-Dart.
+/// Implementation backed by the pure Dart tlslite.
 class PureDartEncryptedSocket implements EncryptedTransport {
   PureDartEncryptedSocket._({
     required this.underlyingTransport,
@@ -62,7 +63,7 @@ class PureDartEncryptedSocket implements EncryptedTransport {
     while (remaining > 0) {
       final chunk = await _tlsConnection.read(max: remaining);
       if (chunk.isEmpty) {
-        throw tds.ClosedConnectionError();
+        throw tds.ClosedConnectionException();
       }
       chunks.add(chunk);
       remaining -= chunk.length;
@@ -84,7 +85,7 @@ class PureDartEncryptedSocket implements EncryptedTransport {
     }
     final chunk = await _tlsConnection.read(max: maxSize);
     if (chunk.isEmpty) {
-      throw tds.ClosedConnectionError();
+      throw tds.ClosedConnectionException();
     }
     return chunk;
   }
@@ -101,6 +102,18 @@ class PureDartEncryptedSocket implements EncryptedTransport {
     return bytes.length;
   }
 
+  /// Negotiated parameters: protocol version, cipher suite, and the record
+  /// cipher with the implementation in use (useful for diagnostics).
+  Map<String, Object?> get negotiated => {
+        'version': _tlsConnection.version.toString(),
+        'cipher_suite':
+            tlslite.CipherSuite.ietfNames[_tlsConnection.session.cipherSuite] ??
+                '0x${_tlsConnection.session.cipherSuite.toRadixString(16)}',
+        'record_cipher': _tlsConnection.getCipherName(),
+        'implementation': _tlsConnection.getCipherImplementation(),
+        'extended_master_secret': _tlsConnection.session.extendedMasterSecret,
+      };
+
   @override
   Future<void> shutdown() async {
     await _tlsConnection.close();
@@ -112,7 +125,7 @@ class PureDartEncryptedSocket implements EncryptedTransport {
     await _ioBridge.closeUnderlying();
   }
 
-  /// Estabelece o canal TLS encapsulado via PRELOGIN.
+  /// Establishes the TLS channel encapsulated in PRELOGIN packets.
   static Future<PureDartEncryptedSocket> establish(
     TlsChannelContext context,
   ) async {
@@ -126,14 +139,28 @@ class PureDartEncryptedSocket implements EncryptedTransport {
 
     final tlsConn = tlslite.TlsConnection.custom(input, output);
     final settings = tlslite.HandshakeSettings(
-      minVersion: (3, 1),
+      minVersion: (3, 3),
       maxVersion: (3, 4),
     );
 
-    await tlsConn.handshakeClient(
-      settings: settings,
-      serverName: context.serverName,
-    );
+    final config = context.tlsConfig;
+    final checker = config.trustServerCertificate
+        ? null
+        : certificateValidator(config.cafile)
+            .checker(hostname: config.validateHost ? context.serverName : null);
+    try {
+      await tlsConn.handshakeClient(
+        settings: settings,
+        serverName: context.serverName,
+        checker: checker,
+      );
+    } on tlslite.TLSCertificateVerificationError catch (error) {
+      throw tds.OperationalException(
+        'Server certificate rejected: ${error.message}. Provide cafile with '
+        'the CA that signed the certificate, or trustServerCertificate: true '
+        'to accept it without validation (the channel stays encrypted).',
+      );
+    }
 
     bridge.enterStreamingMode();
     input.enterStreamingMode();
@@ -163,13 +190,13 @@ class _TdsTlsBinaryInput implements tlslite.BinaryInput {
   @override
   Future<void> ensureBytes(int count) async {
     if (count < 0) {
-      throw ArgumentError.value(count, 'count', 'deve ser não negativo');
+      throw ArgumentError.value(count, 'count', 'must be non-negative');
     }
     while (_buffered < count) {
       final chunk = await _bridge.readChunk(count - _buffered);
       if (chunk.isEmpty) {
         throw StateError(
-          'EOF durante ${_streamingMode ? 'streaming' : 'handshake'} TLS',
+          'EOF during TLS ${_streamingMode ? 'streaming' : 'handshake'}',
         );
       }
       _chunks.addLast(chunk);
@@ -201,7 +228,7 @@ class _TdsTlsBinaryInput implements tlslite.BinaryInput {
   @override
   List<int> readBytes(int length) {
     if (length < 0) {
-      throw ArgumentError.value(length, 'length', 'deve ser não negativo');
+      throw ArgumentError.value(length, 'length', 'must be non-negative');
     }
     if (length == 0) {
       return Uint8List(0);
@@ -214,7 +241,7 @@ class _TdsTlsBinaryInput implements tlslite.BinaryInput {
       return;
     }
     if (_buffered < count) {
-      throw StateError('Dados insuficientes no buffer interno');
+      throw StateError('Not enough data in the internal buffer');
     }
   }
 
@@ -255,7 +282,7 @@ class _TdsTlsBinaryOutput implements tlslite.BinaryOutput {
   int _writeOffset = 0;
 
   void enterStreamingMode() {
-    // Nenhuma ação adicional é necessária neste modo.
+    // No extra action is needed in this mode.
   }
 
   @override
@@ -264,7 +291,7 @@ class _TdsTlsBinaryOutput implements tlslite.BinaryOutput {
   @override
   void ensureCapacity(int count) {
     if (count < 0) {
-      throw ArgumentError.value(count, 'count', 'deve ser não negativo');
+      throw ArgumentError.value(count, 'count', 'must be non-negative');
     }
     final needed = _writeOffset + count;
     if (needed <= _buffer.length) {
@@ -274,8 +301,7 @@ class _TdsTlsBinaryOutput implements tlslite.BinaryOutput {
     if (newCapacity < needed) {
       newCapacity = needed;
     }
-    final newBuf = Uint8List(newCapacity)
-      ..setRange(0, _writeOffset, _buffer);
+    final newBuf = Uint8List(newCapacity)..setRange(0, _writeOffset, _buffer);
     _buffer = newBuf;
   }
 
@@ -319,8 +345,7 @@ class _TdsTlsBinaryOutput implements tlslite.BinaryOutput {
     if (_writeOffset == 0) {
       return;
     }
-    final payload = Uint8List(_writeOffset)
-      ..setRange(0, _writeOffset, _buffer);
+    final payload = Uint8List(_writeOffset)..setRange(0, _writeOffset, _buffer);
     _writeOffset = 0;
     await _bridge.send(payload);
   }

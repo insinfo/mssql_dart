@@ -5,7 +5,7 @@ import 'package:test/test.dart';
 
 void main() {
   group('AsyncOperationLock', () {
-    test('serializa execuções concorrentes', () async {
+    test('serializes concurrent executions', () async {
       final lock = AsyncOperationLock();
       final log = <String>[];
 
@@ -23,17 +23,19 @@ void main() {
         task('C', const Duration(milliseconds: 1)),
       ]);
 
-      expect(log, equals([
-        'start A',
-        'end A',
-        'start B',
-        'end B',
-        'start C',
-        'end C',
-      ]));
+      expect(
+          log,
+          equals([
+            'start A',
+            'end A',
+            'start B',
+            'end B',
+            'start C',
+            'end C',
+          ]));
     });
 
-    test('permite reentrância sem deadlock', () async {
+    test('allows reentrancy without deadlock', () async {
       final lock = AsyncOperationLock();
       final events = <String>[];
 

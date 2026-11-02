@@ -1,11 +1,11 @@
 /// tls_channel.dart
 ///
-/// Implementação do estabelecimento de canal TLS para TDS.
-/// Portado do pytds/tls.py establish_channel e revert_to_clear.
+/// TLS channel establishment for TDS.
+/// Ported from pytds/tls.py establish_channel and revert_to_clear.
 ///
-/// O TDS usa um mecanismo especial onde os dados TLS são encapsulados
-/// em pacotes PRELOGIN durante o handshake, antes de trocar para
-/// comunicação TLS direta.
+/// TDS uses a special mechanism in which TLS data is encapsulated in
+/// PRELOGIN packets during the handshake, before switching to direct TLS
+/// communication.
 
 import 'dart:async';
 import 'dart:typed_data';
@@ -18,29 +18,34 @@ import 'tls_transport.dart';
 import 'tls_providers.dart';
 import 'open_ssl_encrypted_socket.dart';
 
-/// Estabelece um canal TLS sobre uma sessão TDS.
-/// 
-/// Esta função implementa o handshake TLS especial do TDS, onde os dados
-/// do handshake são encapsulados em pacotes PRELOGIN.
-/// 
-/// [session] é a sessão TDS atual.
-/// [login] contém as configurações de TLS.
-/// [provider] especifica qual implementação TLS usar.
-/// 
-/// Após o estabelecimento, o transporte da sessão é substituído pelo
-/// transporte encriptado.
+/// Establishes a TLS channel over a TDS session.
+///
+/// Implements the TDS-specific TLS handshake, in which the handshake data is
+/// encapsulated in PRELOGIN packets.
+///
+/// [session] is the current TDS session, [login] holds the TLS settings, and
+/// [backend] selects the TLS implementation.
+///
+/// Once established, the session's transport is replaced by the encrypted
+/// transport.
 Future<void> establishChannel({
   required TdsSessionForTls session,
   required tds.TdsLogin login,
   TlsBackend backend = TlsBackend.tlslite,
 }) async {
   final provider = await resolveProvider(backend);
+  if (backend == TlsBackend.openSsl && !login.trustServerCertificate) {
+    throw tds.OperationalException(
+      'TlsBackend.openSsl does not validate the server certificate. Use the '
+      'default backend (TlsBackend.tlslite) or pass trustServerCertificate: true.',
+    );
+  }
   if (provider is OpenSslTlsProvider && backend == TlsBackend.openSsl) {
     final available = await OpenSslTlsProvider.isAvailable();
     if (!available) {
-      throw tds.OperationalError(
-        'TlsBackend.openSsl selecionado, mas as bibliotecas OpenSSL não foram carregadas. '
-        'Defina OPENSSL_LIBSSL_PATH/OPENSSL_LIBCRYPTO_PATH ou use tlsBackend=pureDart.',
+      throw tds.OperationalException(
+        'TlsBackend.openSsl selected, but the OpenSSL libraries could not be loaded. '
+        'Set OPENSSL_LIBSSL_PATH/OPENSSL_LIBCRYPTO_PATH or use tlsBackend=pureDart.',
       );
     }
   }
@@ -53,82 +58,83 @@ Future<void> establishChannel({
       await _establishWithOpenSsl(session, login);
       break;
     default:
-      throw tds.OperationalError('Provedor TLS não suportado: ${provider.id}');
+      throw tds.OperationalException(
+          'Unsupported TLS provider: ${provider.id}');
   }
 }
 
-/// Reverte a conexão para modo não-encriptado.
-/// 
-/// Usado quando o cliente enviou ENCRYPT_OFF e precisa voltar para
-/// plaintext após o login encriptado.
-/// 
-/// [session] é a sessão TDS atual.
+/// Reverts the connection to unencrypted mode.
+///
+/// Used when the client sent ENCRYPT_OFF and must return to plaintext after
+/// the encrypted login.
+///
+/// [session] is the current TDS session.
 void revertToClear(TdsSessionForTls session) {
   final currentTransport = session.currentTransport;
-  
+
   if (currentTransport is EncryptedTransport) {
     final clearTransport = currentTransport.underlyingTransport;
-    
-    // Faz shutdown do TLS (envia close_notify)
+
+    // Shut down TLS (sends close_notify)
     currentTransport.shutdown();
-    
-    // Restaura o transporte original
+
+    // Restore the original transport
     session.replaceTransport(clearTransport);
   }
 }
 
-/// Interface que a sessão TDS deve implementar para suportar TLS mid-stream.
+/// Interface a TDS session must implement to support mid-stream TLS.
 abstract class TdsSessionForTls {
-  /// Transporte atual.
+  /// Current transport.
   tds.AsyncTransportProtocol get currentTransport;
-  
-  /// Writer para enviar pacotes.
+
+  /// Writer used to send packets.
   TdsWriterForTls get writer;
-  
-  /// Reader para receber pacotes.
+
+  /// Reader used to receive packets.
   TdsReaderForTls get reader;
-  
-  /// Substitui o transporte atual por um novo.
+
+  /// Replaces the current transport with [newTransport].
   void replaceTransport(tds.AsyncTransportProtocol newTransport);
 }
 
-/// Interface do writer para TLS.
+/// Writer interface used by TLS.
 abstract class TdsWriterForTls {
-  /// Inicia um pacote PRELOGIN.
+  /// Starts a PRELOGIN packet.
   void beginPacket(int packetType);
-  
-  /// Escreve dados no buffer.
+
+  /// Writes [data] to the buffer.
   Future<void> write(List<int> data);
-  
-  /// Envia o pacote.
+
+  /// Sends the packet.
   Future<void> flush();
-  
-  /// Transporte atual.
+
+  /// Current transport.
   tds.AsyncTransportProtocol get transport;
-  
-  /// Define o transporte.
+
+  /// Sets the transport.
   set transport(tds.AsyncTransportProtocol value);
 }
 
-/// Interface do reader para TLS.
+/// Reader interface used by TLS.
 abstract class TdsReaderForTls {
-  /// Inicia leitura de resposta.
+  /// Starts reading a response.
   Future<ResponseMetadata> beginResponse();
-  
-  /// Lê bytes do stream.
+
+  /// Reads [size] bytes from the stream.
   Future<Uint8List> recv(int size);
-  
-  /// Verifica se o stream terminou.
+
+  /// Whether the stream has ended.
   bool streamFinished();
-  
-  /// Transporte atual.
+
+  /// Current transport.
   tds.AsyncTransportProtocol get transport;
-  
-  /// Define o transporte.
+
+  /// Sets the transport.
   set transport(tds.AsyncTransportProtocol value);
 }
 
-/// Estabelece TLS usando OpenSSL FFI.
+/// Establishes TLS using OpenSSL FFI.
 Future<void> _establishWithOpenSsl(
   TdsSessionForTls session,
   tds.TdsLogin login,
@@ -170,11 +176,11 @@ TlsChannelContext _buildTlsContext({
       cafile: login.cafile,
       validateHost: login.validateHost,
       encLoginOnly: login.encLoginOnly,
+      trustServerCertificate: login.trustServerCertificate,
     ),
     sendPreloginPacket: (data) => _sendPreloginFragment(writer, data),
     receivePreloginPacket: () => _receivePreloginFragment(reader),
     onTransportChanged: session.replaceTransport,
-    tlsContext: login.tlsCtx,
   );
 }
 
@@ -192,9 +198,9 @@ Future<Uint8List> _receivePreloginFragment(
 ) async {
   final response = await reader.beginResponse();
   if (response.type != tds.PacketType.PRELOGIN) {
-    throw tds.OperationalError(
-      'Esperado pacote PRELOGIN durante o handshake TLS, '
-      'mas o servidor respondeu com ${response.type}',
+    throw tds.OperationalException(
+      'Expected a PRELOGIN packet during the TLS handshake, '
+      'but the server responded with ${response.type}',
     );
   }
   final builder = BytesBuilder(copy: false);

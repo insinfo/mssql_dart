@@ -4,7 +4,7 @@ import 'dart:typed_data';
 import 'collate.dart';
 import 'tds_base.dart' as tds;
 
-/// Factory para construir objetos de timezone customizados a partir do offset em minutos.
+/// Factory that builds custom time zone objects from an offset in minutes.
 typedef TzInfoFactory = Object? Function(int offsetMinutes);
 
 /// Represents an abstract SQL type.
@@ -179,10 +179,50 @@ class DecimalType extends SqlType {
   String get declaration => 'DECIMAL($precision, $scale)';
 }
 
+/// An exact `decimal`/`numeric` value: [unscaledValue] × 10^-[scale].
 class DecimalValue {
   final BigInt unscaledValue;
   final int scale;
   const DecimalValue({required this.unscaledValue, required this.scale});
+
+  /// Parses a decimal such as `'-123.45'` or `'10'`.
+  factory DecimalValue.parse(String source) {
+    final match =
+        RegExp(r'^\s*([+-]?)(\d*)(?:\.(\d*))?\s*$').firstMatch(source);
+    if (match == null || (match[2]!.isEmpty && (match[3] ?? '').isEmpty)) {
+      throw FormatException('Invalid decimal', source);
+    }
+    final fraction = match[3] ?? '';
+    final digits = '${match[2]}$fraction';
+    final unscaled = BigInt.parse(digits.isEmpty ? '0' : digits);
+    return DecimalValue(
+      unscaledValue: match[1] == '-' ? -unscaled : unscaled,
+      scale: fraction.length,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is DecimalValue &&
+      _rescale(this, other.scale) == _rescale(other, scale);
+
+  @override
+  int get hashCode {
+    var value = unscaledValue;
+    var s = scale;
+    while (s > 0 && value % BigInt.from(10) == BigInt.zero) {
+      value ~/= BigInt.from(10);
+      s--;
+    }
+    return Object.hash(value, s);
+  }
+
+  /// Used by `jsonEncode`: a string, so no precision is lost to a `double`.
+  String toJson() => toString();
+
+  static BigInt _rescale(DecimalValue v, int otherScale) => otherScale > v.scale
+      ? v.unscaledValue * BigInt.from(10).pow(otherScale - v.scale)
+      : v.unscaledValue;
 
   bool get isNegative => unscaledValue.isNegative;
 
@@ -268,15 +308,32 @@ class DateTimeOffsetValue {
   Duration get offset => Duration(minutes: offsetMinutes);
   DateTime get localDateTime => utc.add(offset);
 
-  @override
-  String toString() {
+  /// ISO-8601 with the offset, as SQL Server stores it:
+  /// `2024-01-01T09:00:00.000-03:00`.
+  String toIso8601String() {
     final absMinutes = offsetMinutes.abs();
     final hours = (absMinutes ~/ 60).toString().padLeft(2, '0');
     final minutes = (absMinutes % 60).toString().padLeft(2, '0');
     final sign = offsetMinutes >= 0 ? '+' : '-';
-    final localIso = localDateTime.toIso8601String();
-    return '$localIso (UTC$sign$hours:$minutes)';
+    final local = localDateTime.toIso8601String();
+    // localDateTime is a UTC DateTime; replace the 'Z' with the real offset.
+    return '${local.substring(0, local.length - 1)}$sign$hours:$minutes';
   }
+
+  /// Used by `jsonEncode`.
+  String toJson() => toIso8601String();
+
+  @override
+  bool operator ==(Object other) =>
+      other is DateTimeOffsetValue &&
+      other.utc == utc &&
+      other.offsetMinutes == offsetMinutes;
+
+  @override
+  int get hashCode => Object.hash(utc, offsetMinutes);
+
+  @override
+  String toString() => toIso8601String();
 }
 
 class TableType extends SqlType {
@@ -351,11 +408,13 @@ abstract class BaseTypeSerializer {
   String get debugName;
 
   void writeValue(dynamic value) {
-    throw UnimplementedError('Serializer $debugName.writeValue ainda não foi portado');
+    throw UnimplementedError(
+        'Serializer $debugName.writeValue has not been ported yet');
   }
 
   dynamic readValue() {
-    throw UnimplementedError('Serializer $debugName.readValue ainda não foi portado');
+    throw UnimplementedError(
+        'Serializer $debugName.readValue has not been ported yet');
   }
 }
 
@@ -377,13 +436,15 @@ class SerializerFactory {
   BaseTypeSerializer getTypeSerializer(int typeId) {
     final serializer = _builtInSerializers[typeId];
     if (serializer == null) {
-      throw tds.InterfaceError('Tipo TDS desconhecido: $typeId');
+      throw tds.InterfaceException('Unknown TDS type: $typeId');
     }
     return serializer;
   }
 
   SqlType longBinaryType() {
-    return tdsVersion >= tds.TDS72 ? const VarBinaryMaxType() : const ImageType();
+    return tdsVersion >= tds.TDS72
+        ? const VarBinaryMaxType()
+        : const ImageType();
   }
 
   SqlType longVarcharType() {
@@ -391,7 +452,9 @@ class SerializerFactory {
   }
 
   SqlType longStringType() {
-    return tdsVersion >= tds.TDS72 ? const NVarCharMaxType() : const NTextType();
+    return tdsVersion >= tds.TDS72
+        ? const NVarCharMaxType()
+        : const NTextType();
   }
 
   SqlType datetimeType({int precision = 6}) {
@@ -404,8 +467,9 @@ class SerializerFactory {
 
   SqlType datetimeWithTz({int precision = 6}) {
     if (!supportsDateTimeWithTz()) {
-      throw tds.DataError(
-        'A versão TDS atual não suporta DATETIMEOFFSET (necessário TDS 7.2+)',
+      throw tds.DataException(
+        'The current TDS version does not support DATETIMEOFFSET '
+        '(TDS 7.2+ required)',
       );
     }
     return DateTimeOffsetType(precision: precision);
@@ -417,7 +481,7 @@ class SerializerFactory {
 
   SqlType timeType({int precision = 6}) {
     if (tdsVersion < tds.TDS72) {
-      throw tds.DataError('A versão TDS atual não suporta TIME');
+      throw tds.DataException('The current TDS version does not support TIME');
     }
     return TimeType(precision: precision);
   }
@@ -430,7 +494,8 @@ class SerializerFactory {
     final effectiveCollation = collation ?? raw_collation;
     final typeId = _mapSqlTypeToTypeId(sqlType);
     if (typeId == null) {
-      throw ArgumentError('Não foi possível mapear ${sqlType.declaration} para um typeId TDS');
+      throw ArgumentError(
+          'Could not map ${sqlType.declaration} to a TDS typeId');
     }
     return PlaceholderSerializer(typeId: typeId, sqlType: sqlType);
   }
@@ -438,40 +503,40 @@ class SerializerFactory {
   static final Map<int, BaseTypeSerializer> _builtInSerializers = {
     tds.BITTYPE:
         PlaceholderSerializer(typeId: tds.BITTYPE, sqlType: const BitType()),
-    tds.INT1TYPE:
-        PlaceholderSerializer(typeId: tds.INT1TYPE, sqlType: const TinyIntType()),
-    tds.INT2TYPE:
-        PlaceholderSerializer(typeId: tds.INT2TYPE, sqlType: const SmallIntType()),
+    tds.INT1TYPE: PlaceholderSerializer(
+        typeId: tds.INT1TYPE, sqlType: const TinyIntType()),
+    tds.INT2TYPE: PlaceholderSerializer(
+        typeId: tds.INT2TYPE, sqlType: const SmallIntType()),
     tds.INT4TYPE:
         PlaceholderSerializer(typeId: tds.INT4TYPE, sqlType: const IntType()),
-    tds.INT8TYPE:
-        PlaceholderSerializer(typeId: tds.INT8TYPE, sqlType: const BigIntType()),
+    tds.INT8TYPE: PlaceholderSerializer(
+        typeId: tds.INT8TYPE, sqlType: const BigIntType()),
     tds.FLT4TYPE:
         PlaceholderSerializer(typeId: tds.FLT4TYPE, sqlType: const RealType()),
     tds.FLT8TYPE:
         PlaceholderSerializer(typeId: tds.FLT8TYPE, sqlType: const FloatType()),
-    tds.MONEYTYPE:
-        PlaceholderSerializer(typeId: tds.MONEYTYPE, sqlType: const MoneyType()),
+    tds.MONEYTYPE: PlaceholderSerializer(
+        typeId: tds.MONEYTYPE, sqlType: const MoneyType()),
     tds.MONEY4TYPE: PlaceholderSerializer(
       typeId: tds.MONEY4TYPE,
       sqlType: const SmallMoneyType(),
     ),
-    tds.BIGCHARTYPE:
-        PlaceholderSerializer(typeId: tds.BIGCHARTYPE, sqlType: const CharType()),
+    tds.BIGCHARTYPE: PlaceholderSerializer(
+        typeId: tds.BIGCHARTYPE, sqlType: const CharType()),
     tds.BIGVARCHRTYPE: PlaceholderSerializer(
       typeId: tds.BIGVARCHRTYPE,
       sqlType: const VarCharType(),
     ),
-    tds.NCHARTYPE:
-        PlaceholderSerializer(typeId: tds.NCHARTYPE, sqlType: const NCharType()),
+    tds.NCHARTYPE: PlaceholderSerializer(
+        typeId: tds.NCHARTYPE, sqlType: const NCharType()),
     tds.NVARCHARTYPE: PlaceholderSerializer(
       typeId: tds.NVARCHARTYPE,
       sqlType: const NVarCharType(),
     ),
     tds.TEXTTYPE:
         PlaceholderSerializer(typeId: tds.TEXTTYPE, sqlType: const TextType()),
-    tds.NTEXTTYPE:
-        PlaceholderSerializer(typeId: tds.NTEXTTYPE, sqlType: const NTextType()),
+    tds.NTEXTTYPE: PlaceholderSerializer(
+        typeId: tds.NTEXTTYPE, sqlType: const NTextType()),
     tds.XMLTYPE:
         PlaceholderSerializer(typeId: tds.XMLTYPE, sqlType: const XmlType()),
     tds.BIGBINARYTYPE: PlaceholderSerializer(
@@ -482,8 +547,8 @@ class SerializerFactory {
       typeId: tds.BIGVARBINTYPE,
       sqlType: const VarBinaryType(),
     ),
-    tds.IMAGETYPE:
-        PlaceholderSerializer(typeId: tds.IMAGETYPE, sqlType: const ImageType()),
+    tds.IMAGETYPE: PlaceholderSerializer(
+        typeId: tds.IMAGETYPE, sqlType: const ImageType()),
     tds.DECIMALNTYPE: PlaceholderSerializer(
       typeId: tds.DECIMALNTYPE,
       sqlType: const DecimalType(),
@@ -545,7 +610,8 @@ int? _mapSqlTypeToTypeId(SqlType type) {
   if (type is NTextType) return tds.NTEXTTYPE;
   if (type is XmlType) return tds.XMLTYPE;
   if (type is BinaryType) return tds.BIGBINARYTYPE;
-  if (type is VarBinaryType || type is VarBinaryMaxType) return tds.BIGVARBINTYPE;
+  if (type is VarBinaryType || type is VarBinaryMaxType)
+    return tds.BIGVARBINTYPE;
   if (type is DecimalType) return tds.DECIMALNTYPE;
   if (type is VariantType) return tds.SSVARIANTTYPE;
   if (type is SmallDateTimeType) return tds.DATETIM4TYPE;
@@ -614,7 +680,9 @@ class TdsTypeInferrer {
       return const DecimalType(precision: 38, scale: 0);
     } else if (value is DateTime || type == DateTime) {
       final dateTime = value as DateTime?;
-      if (dateTime != null && dateTime.isUtc && allowTz &&
+      if (dateTime != null &&
+          dateTime.isUtc &&
+          allowTz &&
           typeFactory.supportsDateTimeWithTz()) {
         return typeFactory.datetimeWithTz();
       }
@@ -635,7 +703,7 @@ class TdsTypeInferrer {
           }
           value.rows = [firstRow, ...rows.skip(1)];
         } else {
-          throw tds.DataError('Não há linhas para inferir o schema do TVP');
+          throw tds.DataException('No rows to infer the TVP schema from');
         }
       }
       return TableType(
@@ -645,6 +713,7 @@ class TdsTypeInferrer {
       );
     }
 
-    throw tds.DataError('Não é possível inferir tipo TDS para valor ${value.runtimeType}');
+    throw tds.DataException(
+        'Cannot infer a TDS type for a value of type ${value.runtimeType}');
   }
 }

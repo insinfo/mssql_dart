@@ -1,7 +1,8 @@
 import 'dart:math';
 
-import 'package:mssql_dart/mssql_dart.dart';
+import 'package:mssql_dart/tds.dart';
 import 'package:test/test.dart';
+import 'test_config.dart';
 
 void main() {
   const host = 'localhost';
@@ -10,30 +11,29 @@ void main() {
   const user = 'dart';
   const password = 'dart';
 
-  group('AsyncDbConnection', () {
-    late AsyncDbConnection conn;
+  group('MssqlConnection', () {
+    late MssqlConnection conn;
 
     setUp(() async {
-      conn = await dbConnectAsync(
-          host: host,
-          port: port,
-          user: user,
-          password: password,
-          database: database,
-          bytesToUnicode: true,
-          encrypt: false,
-          tlsBackend: TlsBackend.openSsl);
+      conn = await MssqlConnection.connect(MssqlConnectionSettings(
+        host: host,
+        port: port,
+        username: user,
+        password: password,
+        database: database,
+        encrypt: false,
+      ));
     });
 
     tearDown(() async {
       await conn.close();
     });
 
-    test('execute + fetchone', () async {
-      final cursor = await conn.execute('SELECT 41 + 1');
-      final row = await cursor.fetchone() as List<dynamic>?;
+    test('execute + fetchOne', () async {
+      final cursor = await conn.openCursor('SELECT 41 + 1');
+      final row = await cursor.fetchOne() as List<dynamic>?;
       expect(row, equals([42]));
-      expect(await cursor.fetchone(), isNull);
+      expect(await cursor.fetchOne(), isNull);
       await cursor.close();
     });
 
@@ -44,30 +44,30 @@ void main() {
       final cursor = conn.cursor();
       await cursor.execute(
           'CREATE TABLE $tableName (id INT PRIMARY KEY, nome NVARCHAR(40));');
-      await cursor.fetchall();
+      await cursor.fetchAll();
 
       addTearDown(() async {
         try {
           await cursor.execute(
               "IF OBJECT_ID('tempdb..$tableName') IS NOT NULL DROP TABLE $tableName");
-          await cursor.fetchall();
+          await cursor.fetchAll();
         } catch (_) {
-          // Falha original do teste é mais importante.
+          // The original test failure matters more.
         }
       });
 
       for (var i = 0; i < 2; i++) {
         await cursor.execute(
             "INSERT INTO $tableName (id, nome) VALUES ($i, N'Nome $i')");
-        await cursor.fetchall();
+        await cursor.fetchAll();
       }
 
       await cursor.execute('SELECT COUNT(*) FROM $tableName');
-      final countRow = await cursor.fetchone() as List<dynamic>?;
+      final countRow = await cursor.fetchOne() as List<dynamic>?;
       expect(countRow, equals([2]));
 
       await cursor.execute('SELECT id, nome FROM $tableName ORDER BY id');
-      final rows = (await cursor.fetchall()).cast<List<dynamic>>();
+      final rows = (await cursor.fetchAll()).cast<List<dynamic>>();
       expect(
           rows,
           equals([
@@ -76,33 +76,33 @@ void main() {
           ]));
 
       await cursor.execute('DROP TABLE $tableName');
-      await cursor.fetchall();
+      await cursor.fetchAll();
       await cursor.close();
     });
 
-    test('cursor respects nextset', () async {
+    test('cursor respects nextSet', () async {
       final cursor = conn.cursor();
       await cursor.execute('SELECT 1 AS primeira; SELECT 2 AS segunda;');
       expect(
-          await cursor.fetchall(),
+          await cursor.fetchAll(),
           equals([
             [1],
           ]));
-      expect(await cursor.nextset(), isTrue);
+      expect(await cursor.nextSet(), isTrue);
       expect(
-          await cursor.fetchall(),
+          await cursor.fetchAll(),
           equals([
             [2],
           ]));
-      expect(await cursor.nextset(), isFalse);
+      expect(await cursor.nextSet(), isFalse);
       await cursor.close();
     });
 
-    test('serializa execuções concorrentes', () async {
+    test('serializes concurrent executions', () async {
       Future<int> job(int value) async {
         final cursor = conn.cursor();
         await cursor.execute("WAITFOR DELAY '00:00:00.3'; SELECT $value");
-        final rows = (await cursor.fetchall()).cast<List<dynamic>>();
+        final rows = (await cursor.fetchAll()).cast<List<dynamic>>();
         await cursor.close();
         return rows.first.first as int;
       }
@@ -118,45 +118,45 @@ void main() {
       expect(sw.elapsedMilliseconds, greaterThanOrEqualTo(550));
     });
 
-    test('cursor executemany soma rowcount', () async {
+    test('cursor executeMany sums rowcount', () async {
       final seed = Random().nextInt(1 << 16);
       final tableName = '#async_many_${seed.toRadixString(16)}';
 
       final cursor = conn.cursor();
       await cursor.execute(
           'CREATE TABLE $tableName (id INT PRIMARY KEY, nome NVARCHAR(40));');
-      await cursor.fetchall();
+      await cursor.fetchAll();
 
       addTearDown(() async {
         try {
           await cursor.execute(
               "IF OBJECT_ID('tempdb..$tableName') IS NOT NULL DROP TABLE $tableName");
-          await cursor.fetchall();
+          await cursor.fetchAll();
         } catch (_) {}
       });
 
-      await cursor.executemany(
+      await cursor.executeMany(
         'INSERT INTO $tableName (id, nome) VALUES (@p0, @p1)',
         [
           [0, 'Nome 0'],
           [1, 'Nome 1'],
         ],
       );
-      await cursor.fetchall();
-      expect(cursor.rowcount, equals(2));
+      await cursor.fetchAll();
+      expect(cursor.affectedRows, equals(2));
 
-      await cursor.executemany(
+      await cursor.executeMany(
         'UPDATE $tableName SET nome = @nome WHERE id = @id',
         [
           {'id': 0, 'nome': 'Atualizado 0'},
           {'@id': 1, '@nome': 'Atualizado 1'},
         ],
       );
-      await cursor.fetchall();
-      expect(cursor.rowcount, equals(2));
+      await cursor.fetchAll();
+      expect(cursor.affectedRows, equals(2));
 
       await cursor.execute('SELECT id, nome FROM $tableName ORDER BY id');
-      final rows = (await cursor.fetchall()).cast<List<dynamic>>();
+      final rows = (await cursor.fetchAll()).cast<List<dynamic>>();
       expect(
           rows,
           equals([
@@ -174,16 +174,17 @@ void main() {
       const baseSum = seriesSize * (seriesSize + 1) ~/ 2;
 
       Future<void> runClient(int clientIndex) async {
-        final local = await dbConnectAsync(
+        final local = await MssqlConnection.connect(MssqlConnectionSettings(
+          caFile: testCa,
+          trustServerCertificate: testTrustServerCertificate,
           host: host,
           port: port,
-          user: user,
+          username: user,
           password: password,
           database: database,
-          bytesToUnicode: true,
           encrypt: true,
           tlsBackend: TlsBackend.tlslite,
-        );
+        ));
 
         try {
           final cursor = local.cursor();
@@ -200,7 +201,7 @@ SELECT SUM(numbers.n) + $clientIndex + $iteration AS total
 FROM numbers;
 ''');
 
-              final rows = (await cursor.fetchall()).cast<List<dynamic>>();
+              final rows = (await cursor.fetchAll()).cast<List<dynamic>>();
               expect(rows.length, equals(1));
               expect(rows.first.length, equals(1));
               expect(

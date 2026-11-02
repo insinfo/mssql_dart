@@ -1,24 +1,27 @@
-/// Testes de integração para TLS encrypted socket.
+import 'dart:async';
+
+/// Integration tests for the TLS encrypted socket.
 ///
-/// Estes testes requerem um SQL Server rodando localmente.
-/// Configuração esperada:
+/// These tests require a SQL Server running locally.
+/// Expected configuration:
 /// - Host: localhost
 /// - Port: 1433
 /// - Database: dart
 /// - User: dart
 /// - Password: dart
 ///
-/// Para rodar testes TLS, o SQL Server deve estar configurado com:
-/// - Certificado TLS válido
-/// - Force Encryption = Yes (ou aceitar conexões encriptadas)
+/// To run the TLS tests, SQL Server must be configured with:
+/// - A valid TLS certificate
+/// - Force Encryption = Yes (or accept encrypted connections)
 ///
-/// Os cenários TLS e sem TLS foram separados em grupos independentes para
-/// facilitar a execução direcionada de acordo com o ambiente disponível.
+/// The TLS and non-TLS scenarios are split into independent groups so they
+/// can be run selectively depending on the available environment.
 
 import 'dart:io';
 
-import 'package:mssql_dart/mssql_dart.dart';
+import 'package:mssql_dart/tds.dart';
 import 'package:test/test.dart';
+import 'test_config.dart';
 
 void main() {
   const host = 'localhost';
@@ -28,9 +31,10 @@ void main() {
   const password = 'dart';
 
   group('TLS Connection Tests', () {
-    test('connectAsync com TLS usando SecureSocket nativo (TLS-first)', () async {
-      // Este teste usa o SecureSocket nativo do Dart
-      // Requer que o servidor suporte TLS
+    test('connectAsync with TLS using the native SecureSocket (TLS-first)',
+        () async {
+      // This test uses Dart's native SecureSocket.
+      // Requires the server to support TLS.
       final socket = await connectAsync(
         host: host,
         port: port,
@@ -38,14 +42,15 @@ void main() {
         password: password,
         database: database,
         encrypt: true,
-        validateHost: false, // localhost geralmente não tem certificado válido
+        cafile: testCa,
+        trustServerCertificate: testTrustServerCertificate,
       );
       addTearDown(() => socket.close());
 
       expect(socket.isConnected, isTrue);
       expect(socket.env.database?.toLowerCase(), equals(database));
 
-      // Executa uma query para verificar que TLS funciona
+      // Runs a query to check that TLS works
       await socket.runSerial((session) async {
         await session.submitPlainQuery('SELECT @@VERSION AS sql_version');
         await session.processSimpleRequest();
@@ -57,25 +62,26 @@ void main() {
       expect(row!.first.toString(), contains('Microsoft SQL Server'));
     });
 
-    test('dbConnectAsync com TLS', () async {
-      // Teste usando a API de alto nível dbConnectAsync
-      final conn = await dbConnectAsync(
+    test('dbConnectAsync with TLS', () async {
+      // Test using the high-level dbConnectAsync API
+      final conn = await MssqlConnection.connect(MssqlConnectionSettings(
         host: host,
         port: port,
-        user: user,
+        username: user,
         password: password,
         database: database,
         encrypt: true,
-        validateHost: false,
-      );
+        caFile: testCa,
+        trustServerCertificate: testTrustServerCertificate,
+      ));
       addTearDown(() => conn.close());
 
-      // Executa uma query usando a API de cursor
+      // Runs a query using the cursor API
       final cursor = conn.cursor();
       addTearDown(() => cursor.close());
 
       await cursor.execute('SELECT 42 AS answer');
-      final rows = await cursor.fetchall();
+      final rows = await cursor.fetchAll();
 
       expect(rows, hasLength(1));
       final firstRow = rows.first;
@@ -87,9 +93,11 @@ void main() {
   });
 
   group('TLS Error Handling', () {
-    test('connectAsync com host inválido falha graciosamente', () async {
+    test('connectAsync with an invalid host fails gracefully', () async {
       expect(
         () => connectAsync(
+          cafile: testCa,
+          trustServerCertificate: testTrustServerCertificate,
           host: 'host-que-nao-existe.invalid',
           port: port,
           user: user,
@@ -101,16 +109,19 @@ void main() {
         throwsA(
           predicate((e) =>
               e is Exception &&
-              e.toString().contains('Falha ao conectar a host-que-nao-existe.invalid')),
+              e.toString().contains(
+                  'Failed to connect to host-que-nao-existe.invalid')),
         ),
       );
     });
 
-    test('connectAsync com porta errada falha graciosamente', () async {
+    test('connectAsync with a wrong port fails gracefully', () async {
       expect(
         () => connectAsync(
+          cafile: testCa,
+          trustServerCertificate: testTrustServerCertificate,
           host: host,
-          port: 9999, // Porta incorreta
+          port: 9999, // Wrong port
           user: user,
           password: password,
           database: database,
@@ -120,44 +131,84 @@ void main() {
         throwsA(
           predicate((e) =>
               e is Exception &&
-              e.toString().contains('Falha ao conectar a localhost:9999')),
+              e.toString().contains('Failed to connect to localhost:9999')),
         ),
       );
     });
   });
 
-  group('TLS with SecurityContext', () {
-    test('connectAsync com SecurityContext customizado', () async {
-      // Cria um SecurityContext que aceita certificados self-signed
-      final context = SecurityContext(withTrustedRoots: true);
-      // Em produção, você carregaria certificados específicos aqui:
-      // context.setTrustedCertificates('path/to/ca.pem');
+  group('Certificate validation', skip: skipWithoutTestCertificate, () {
+    test('rejects a self-signed certificate outside the system bundle',
+        () async {
+      await expectLater(
+        connectAsync(
+            host: host,
+            port: port,
+            user: user,
+            password: password,
+            database: database),
+        throwsA(isA<OperationalException>().having((e) => e.message, 'message',
+            contains('Server certificate rejected'))),
+      );
+    });
 
+    test('accepts with trustServerCertificate', () async {
       final socket = await connectAsync(
         host: host,
         port: port,
         user: user,
         password: password,
         database: database,
-        encrypt: true,
-        validateHost: false,
-        securityContext: context,
+        trustServerCertificate: true,
       );
-      addTearDown(() => socket.close());
+      await socket.close();
+    });
 
-      expect(socket.isConnected, isTrue);
+    test('validates by the SAN IP address', () async {
+      final socket = await connectAsync(
+        host: '127.0.0.1',
+        port: port,
+        user: user,
+        password: password,
+        database: database,
+        cafile: testCa,
+        trustServerCertificate: testTrustServerCertificate,
+      );
+      await socket.close();
+    });
+  });
 
-      await socket.runSerial((session) async {
-        await session.submitPlainQuery('SELECT 1');
-        await session.processSimpleRequest();
+  group('Connection timeout', () {
+    test('a server that accepts TCP and never answers is abandoned on time',
+        () async {
+      final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final closed = Completer<void>();
+      server.listen((client) {
+        client.listen((_) {}, onDone: () {
+          if (!closed.isCompleted) closed.complete();
+          client.destroy();
+        });
       });
-
-      expect(socket.hasBufferedRows, isTrue);
+      addTearDown(server.close);
+      final sw = Stopwatch()..start();
+      await expectLater(
+        connectAsync(
+          host: '127.0.0.1',
+          port: server.port,
+          user: user,
+          password: password,
+          timeout: const Duration(seconds: 1),
+        ),
+        throwsA(isA<OperationalException>()),
+      );
+      expect(sw.elapsed, lessThan(const Duration(seconds: 5)));
+      // The driver closes the socket: the server receives the FIN.
+      await closed.future.timeout(const Duration(seconds: 5));
     });
   });
 
   group('Multiple TLS Queries', () {
-    test('múltiplas queries em conexão TLS', () async {
+    test('multiple queries over a TLS connection', () async {
       final socket = await connectAsync(
         host: host,
         port: port,
@@ -165,7 +216,8 @@ void main() {
         password: password,
         database: database,
         encrypt: true,
-        validateHost: false,
+        cafile: testCa,
+        trustServerCertificate: testTrustServerCertificate,
       );
       addTearDown(() => socket.close());
 
@@ -183,7 +235,7 @@ void main() {
       });
       expect(socket.takeRow(), equals([2]));
 
-      // Query 3 - com múltiplas linhas
+      // Query 3 - with multiple rows
       await socket.runSerial((session) async {
         await session.submitPlainQuery(
           'SELECT n FROM (VALUES (1), (2), (3)) AS t(n)',
@@ -195,22 +247,23 @@ void main() {
       expect(rows.map((r) => r.first), containsAll([1, 2, 3]));
     });
 
-    test('transação em conexão TLS', () async {
-      final conn = await dbConnectAsync(
+    test('transaction over a TLS connection', () async {
+      final conn = await MssqlConnection.connect(MssqlConnectionSettings(
         host: host,
         port: port,
-        user: user,
+        username: user,
         password: password,
         database: database,
         encrypt: true,
-        validateHost: false,
-      );
+        caFile: testCa,
+        trustServerCertificate: testTrustServerCertificate,
+      ));
       addTearDown(() => conn.close());
 
       final cursor = conn.cursor();
       addTearDown(() => cursor.close());
 
-      // Cria tabela temporária
+      // Creates a temporary table
       await cursor.execute('''
         CREATE TABLE #tls_test (
           id INT PRIMARY KEY,
@@ -218,25 +271,25 @@ void main() {
         )
       ''');
 
-      // Insert com transação
+      // Insert inside a transaction
       await cursor.execute('BEGIN TRANSACTION');
       await cursor.execute("INSERT INTO #tls_test VALUES (1, 'test TLS')");
       await cursor.execute('COMMIT');
 
-      // Verifica
+      // Checks
       await cursor.execute('SELECT * FROM #tls_test');
-      final rows = await cursor.fetchall();
+      final rows = await cursor.fetchAll();
 
-          expect(rows, hasLength(1));
-          final firstRow = rows.first;
-          final id = firstRow is Map<String, dynamic>
-            ? firstRow['id']
-            : (firstRow as List)[0];
-          final value = firstRow is Map<String, dynamic>
-            ? firstRow['value']
-            : (firstRow as List)[1];
-          expect(id, equals(1));
-          expect(value, equals('test TLS'));
+      expect(rows, hasLength(1));
+      final firstRow = rows.first;
+      final id = firstRow is Map<String, dynamic>
+          ? firstRow['id']
+          : (firstRow as List)[0];
+      final value = firstRow is Map<String, dynamic>
+          ? firstRow['value']
+          : (firstRow as List)[1];
+      expect(id, equals(1));
+      expect(value, equals('test TLS'));
     });
   });
 }

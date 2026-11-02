@@ -1,6 +1,6 @@
 import 'dart:io';
 
-/// Interface para transportes assíncronos capazes de realizar upgrade para TLS.
+/// Interface for asynchronous transports that can be upgraded to TLS.
 abstract class AsyncTlsTransport {
   Future<void> upgradeToSecureSocket({
     required SecurityContext context,

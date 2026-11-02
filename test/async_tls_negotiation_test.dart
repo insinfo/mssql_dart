@@ -10,7 +10,7 @@ import 'package:test/test.dart';
 
 void main() {
   group('AsyncTdsSession TLS negotiation', () {
-    test('não faz nada quando transporte já está seguro', () async {
+    test('does nothing when the transport is already secure', () async {
       final transport = _FakeTlsTransport(isSecure: true);
       final session = _buildSession(transport);
       final login = _buildLogin(encFlag: tds.PreLoginEnc.ENCRYPT_REQ);
@@ -21,7 +21,8 @@ void main() {
       );
     });
 
-    test('lança erro quando servidor exige TLS mas transporte é plaintext', () async {
+    test('throws when the server requires TLS but the transport is plaintext',
+        () async {
       final transport = _FakeTlsTransport(isSecure: false);
       final session = _buildSession(transport);
       final login = _buildLogin(encFlag: tds.PreLoginEnc.ENCRYPT_OFF);
@@ -31,11 +32,12 @@ void main() {
           login,
           tds.PreLoginEnc.ENCRYPT_ON,
         ),
-        throwsA(isA<tds.OperationalError>()),
+        throwsA(isA<tds.OperationalException>()),
       );
     });
 
-    test('plaintext segue permitido quando servidor responde ENCRYPT_OFF', () async {
+    test('plaintext is still allowed when the server answers ENCRYPT_OFF',
+        () async {
       final transport = _FakeTlsTransport(isSecure: false);
       final session = _buildSession(transport);
       final login = _buildLogin(encFlag: tds.PreLoginEnc.ENCRYPT_OFF);
@@ -66,7 +68,8 @@ tds.TdsLogin _buildLogin({required int encFlag}) {
   return login;
 }
 
-class _FakeTlsTransport implements tds.AsyncTransportProtocol, AsyncTlsTransport {
+class _FakeTlsTransport
+    implements tds.AsyncTransportProtocol, AsyncTlsTransport {
   _FakeTlsTransport({this.isSecure = false});
 
   @override
@@ -80,22 +83,22 @@ class _FakeTlsTransport implements tds.AsyncTransportProtocol, AsyncTlsTransport
 
   @override
   Future<Uint8List> recv(int size) {
-    throw UnimplementedError('recv não deve ser chamado nos testes');
+    throw UnimplementedError('recv must not be called in tests');
   }
 
   @override
   Future<Uint8List> recvAvailable(int maxSize) {
-    throw UnimplementedError('recvAvailable não deve ser chamado nos testes');
+    throw UnimplementedError('recvAvailable must not be called in tests');
   }
 
   @override
   Future<int> recvInto(ByteBuffer buffer, {int size = 0, int flags = 0}) {
-    throw UnimplementedError('recvInto não deve ser chamado nos testes');
+    throw UnimplementedError('recvInto must not be called in tests');
   }
 
   @override
   Future<void> sendAll(List<int> data, {int flags = 0}) {
-    throw UnimplementedError('sendAll não deve ser chamado nos testes');
+    throw UnimplementedError('sendAll must not be called in tests');
   }
 
   @override
@@ -111,6 +114,6 @@ class _FakeTlsTransport implements tds.AsyncTransportProtocol, AsyncTlsTransport
     String? host,
     bool loginOnly = false,
   }) async {
-    throw UnimplementedError('upgradeToSecureSocket não deve ser usado nos testes');
+    throw UnimplementedError('upgradeToSecureSocket must not be used in tests');
   }
 }

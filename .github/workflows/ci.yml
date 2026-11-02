@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  # 'true' tests against tlslite from GitHub (pubspec_overrides.yaml) instead of
+  # the version published on pub.dev.
+  TLSLITE_FROM_GIT: 'false'
+  MSSQL_SA_PASSWORD: 'Dart_Passw0rd!'
+
+jobs:
+  linux:
+    name: Linux (SQL Server 2022, Dart ${{ matrix.sdk }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: ['3.6.2', stable]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: mssql_dart
+      - uses: actions/checkout@v4
+        if: env.TLSLITE_FROM_GIT == 'true'
+        with:
+          repository: insinfo/tlslite
+          path: tlslite
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: ${{ matrix.sdk }}
+
+      - name: Start SQL Server with the test certificate
+        working-directory: mssql_dart
+        run: |
+          printf '[network]\ntlscert = /var/opt/mssql/certs/sqlserver.crt\ntlskey = /var/opt/mssql/certs/sqlserver.key\ntlsprotocols = 1.2\nforceencryption = 0\n' > mssql.conf
+          docker create --name mssql -p 1433:1433 \
+            -e ACCEPT_EULA=Y -e MSSQL_PID=Developer -e MSSQL_SA_PASSWORD="$MSSQL_SA_PASSWORD" \
+            mcr.microsoft.com/mssql/server:2022-latest
+          chmod 644 test/certificates/sqlserver.key
+          docker cp test/certificates mssql:/var/opt/mssql/certs
+          docker cp mssql.conf mssql:/var/opt/mssql/mssql.conf
+          docker start mssql
+          sqlcmd() { docker exec mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$MSSQL_SA_PASSWORD" "$@"; }
+          for i in $(seq 1 60); do sqlcmd -Q 'SELECT 1' >/dev/null 2>&1 && break; sleep 2; done
+          sqlcmd -b -Q "CREATE DATABASE dart;
+            CREATE LOGIN dart WITH PASSWORD = 'dart', CHECK_POLICY = OFF, DEFAULT_DATABASE = dart;
+            ALTER SERVER ROLE sysadmin ADD MEMBER dart;"
+          docker logs mssql 2>&1 | grep -i 'certificate' || true
+
+      - name: Use tlslite from git
+        if: env.TLSLITE_FROM_GIT == 'true'
+        working-directory: mssql_dart
+        run: |
+          printf 'dependency_overrides:\n  tlslite:\n    path: ../tlslite\n' > pubspec_overrides.yaml
+
+      - working-directory: mssql_dart
+        run: dart pub get
+      - name: Format
+        if: matrix.sdk == 'stable'
+        working-directory: mssql_dart
+        run: dart format --output=none --set-exit-if-changed lib test example benchmark
+      - working-directory: mssql_dart
+        run: dart analyze --fatal-infos
+      - working-directory: mssql_dart
+        run: dart test -j 1 --reporter expanded
+      - name: Example
+        working-directory: mssql_dart
+        env:
+          MSSQL_USER: dart
+          MSSQL_PASSWORD: dart
+        run: dart run example/main.dart
+
+  windows:
+    name: Windows (SQL Server 2022)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: mssql_dart
+      - uses: actions/checkout@v4
+        if: env.TLSLITE_FROM_GIT == 'true'
+        with:
+          repository: insinfo/tlslite
+          path: tlslite
+      - uses: dart-lang/setup-dart@v1
+
+      - name: Install SQL Server
+        uses: potatoqualitee/mssqlsuite@v1.8
+        with:
+          install: sqlengine
+          version: '2022'
+          sa-password: ${{ env.MSSQL_SA_PASSWORD }}
+
+      - name: Create test database and login
+        shell: pwsh
+        run: |
+          sqlcmd -S localhost -U sa -P "$env:MSSQL_SA_PASSWORD" -C -b -Q "CREATE DATABASE dart; CREATE LOGIN dart WITH PASSWORD = 'dart', CHECK_POLICY = OFF, DEFAULT_DATABASE = dart; ALTER SERVER ROLE sysadmin ADD MEMBER dart;"
+
+      - name: Use tlslite from git
+        if: env.TLSLITE_FROM_GIT == 'true'
+        working-directory: mssql_dart
+        shell: pwsh
+        run: |
+          Set-Content pubspec_overrides.yaml "dependency_overrides:`n  tlslite:`n    path: ../tlslite`n"
+
+      - working-directory: mssql_dart
+        run: dart pub get
+      - working-directory: mssql_dart
+        run: dart analyze --fatal-infos
+      - name: Test
+        working-directory: mssql_dart
+        env:
+          # The server uses the certificate it generated itself.
+          MSSQL_TRUST_SERVER_CERTIFICATE: 'true'
+        run: dart test -j 1 --reporter expanded

@@ -1,62 +1,13 @@
-reponda sempre em portugues
-continue portando o C:\MyDartProjects\mssql_dart\pytds para dart e atualizando o C:\MyDartProjects\mssql_dart\TODO.md
+# Pendências
 
-use o comando rg para buscar no codigo fonte
+O que falta para cobrir tudo o que o SQL Server oferece. O histórico do port
+está no git.
 
-- [x] 2025-12-04: Portados `progErrors`, `integrityErrors`, `InterfaceError`, alias de timeout e `_createExceptionByMessage`; helpers `skipall`, `readChunks`, `readall` e `readallFast` agora usam `TransportProtocol`. Ajustado `tds7CryptPass` para codificar em UTF-16LE equivalente.
-- [x] 2025-12-04: Acrescentado `tds_types.dart` com definições de tipos SQL, fábrica de serializers e inferência básica para sustentar o restante do port.
-- [x] 2025-12-04: Iniciado `tds_socket.dart` com `SocketTransport` (baseado em `RawSynchronousSocket`), construtor de sessões e esqueleto de `_TdsSocket` (login/close/mars placeholders).
-- [x] 2025-12-05: `collate.dart` agora resolve codecs reais via pacote `charset`, adicionando suporte explícito a UTF-16LE/`ucs2` com `galileo_utf` e tratamento de `Collation.get_codec` baseado em nomes de charset.
-- [x] 2025-12-05: Código do `fl_charset` copiado para `lib/third_party/fl_charset` junto com a licença correspondente e `collate.dart` atualizado para importar a versão interna em vez do pacote externo.
-- [x] 2025-12-05: CP950/Big5 agora usam o codec `Big5` do `enough_convert` interno (`lib/third_party/enough_convert`), permitindo que collations tradicionais retornem o encoding correto.
-- [x] 2025-12-05: Camada de sessão/transportes ganhou scaffolds: `session_link.dart`, `tds_socket.dart` agora aceita builder padrão, e foram criados placeholders para `tds_reader.dart`, `tds_writer.dart` e `tds_session.dart` (métodos básicos ainda retornam stubs, mas a API já está definida).
-- [x] 2025-12-05: Portados `tds_reader.dart`/`tds_writer.dart` com parsing completo de cabeçalhos, PLP e helpers numéricos, eliminando os stubs iniciais.
-- [x] 2025-12-05: `SocketTransport` agora usa `RawSynchronousSocket` real para `sendall`/`recv`, expõe descritor e ganchos para upgrade TLS conforme `pytds.tls`.
-- [x] 2025-12-05: `_TdsSession` envia PRELOGIN/LOGIN reais, parseia LOGINACK/ENVCHANGE/INFO/ERROR/DONE, dá suporte a queries simples (`submitPlainQuery`/`processSimpleRequest`) e mantém rastreamento de mensagens para `raiseDbException`.
-- [x] 2025-12-05: `TdsSession` passou a herdar `SerializerFactory`, collation inicial e `bytesToUnicode` do builder/contexto, expondo `updateTypeSystem` para manter a sessão alinhada com `_TdsSocket` antes de portar tokens de result set.
-- [x] 2025-12-05: Sessão e socket agora compartilham mudanças de collation via callback (`SessionBuildContext.onCollationChanged`), permitindo atualizar o `TdsTypeInferrer` em tempo real antes de portar COLMETADATA/rows.
-- [x] 2025-12-05: `_TdsSession` passou a propagar ENVCHANGE de charset/LCID/transações/routing para `_TdsSocket`, mantendo `tds72Transaction`, `route`, flags unicode e charset sincronizados com o servidor.
-- [x] 2025-12-05: Portadas `row_strategies` básicas (tuple/list/dict), `SessionBuildContext` expõe um `RowStrategy` tipado e `TdsSocket` pode atualizar a estratégia em tempo real sincronizando com `TdsSession`, preparando o loop de resultados para respeitar o formato configurado.
-- [x] 2025-12-05: `_TdsSession` já interpreta tokens `COLMETADATA`, monta `tds.Results` com descrições e lê `TYPE_INFO` básico (int/decimal/char/binário/texto/xml/UDT), reconstruindo o `RowStrategy` com os nomes de coluna; parsing de linhas reais (`ROW`/`NBCROW`) segue pendente.
-- [x] 2025-12-05: `_TdsSession` agora reinicia o estado de resultados ao enviar novas queries e expõe `nextRow`/`findResultOrDone`/`nextSet`, permitindo iterar result sets como no `pytds._TdsSession` (incluindo detecção de `DONE` com/sem `rowcount`).
-- [x] 2025-12-05: Adicionado `scripts/test_pytds_driver.py` para validar logins contra SQL Server local usando o checkout de `pytds/src`, evitando o `pip install` que falha com versão `unknown`; o script fixa `user/password` como `dart`, host `localhost`, remove variáveis de ambiente supérfluas e sempre grava `scripts/pytds_driver.log` via tee para stdout.
-- [x] 2025-12-05: `pytds.tds_session` ganhou `_trace` com cobertura de PRELOGIN/LOGIN/tokens (`PYTDS_TRACE_EVENTS=1` por padrão no `scripts/test_pytds_driver.py`), e o port em Dart agora aceita um `traceHook` equivalente (`SessionBuildContext.traceHook`) para emitir os mesmos eventos durante o desenvolvimento.
-- [x] 2025-12-05: Criado `test/integration/python_trace_test.dart`, skipado salvo `MSSQL_DART_INTEGRATION=1`, que executa `scripts/test_pytds_driver.py`, garante `scripts/pytds_driver.log` e confere os eventos `prelogin.send`/`login.ack`/`done` como base para validar o port.
-- [x] 2025-12-05: Disponibilizado `connectSync` (`lib/src/connect.dart`, exportado por `mssql_dart.dart`) para encapsular `SocketTransport` + `_TdsLogin`, padronizando client/appName e permitindo injetar `traceHook` durante o login.
-- [x] 2025-12-05: Adicionado `test/integration/dart_login_test.dart`, que usa `connectSync` para logar com `dart/dart` em `localhost:1433` e garante que `TdsSocket` fica conectado/`env.database` ajustado.
-- [x] 2025-12-05: Portar transporte assíncrono baseado em `Socket`/`SecureSocket`, expondo API `Future` equivalente a `TransportProtocol` (ex.: `AsyncTransportProtocol`) e atualizar `TdsReader/TdsWriter` para modos async (novos `AsyncSocketTransport`, `AsyncTdsReader` e `AsyncTdsWriter`).
-- [x] 2025-12-05: Adotado "Caminho A" (TLS-first pragmático): `connectAsync` ganhou `encrypt=true/false` e, quando habilitado, estabelece `SecureSocket.connect` antes do PRELOGIN; `_buildLogin` agora usa `ENCRYPT_REQ` apenas nesse modo, `AsyncTdsSession` trata `encrypt_flag` sem tentar upgrade dinâmico e `enc_login_only` foi removido da V1.
-- [ ] 2025-12-05: V2 de TLS/compatibilidade antiga: portar `pytds/tls.py` (login-only, revert_to_clear e upgrade dinâmico)  o `tlslite-ng` agora ja esta pronto e disponível, incluindo suporte a servidores que exigem `ENCRYPT_OFF/ON/REQ` sem `SecureSocket.connect` antecipado e a troca de transporte síncrono. **Status:** handshake encapsulado com provider `pureDart` concluído usando `tlslite` custom/BinaryIO; falta expor provider `openssl`, validação de host e fluxo `revert_to_clear`.
-- [x] 2025-12-05: Criar `AsyncTdsSession`/`AsyncTdsSocket` para usar o transporte async, garantindo `sendPrelogin/login/processLoginTokens` em `Future`, cancelamentos e hooks de trace equivalentes (novos `connectAsync`, `AsyncSessionLink` e `AsyncSessionBuilder`).
-- [x] 2025-12-05: Adicionar testes de integração async (ex.: `dart_login_async_test.dart`) cobrindo handshake básico com `connectAsync`, validando `login.ack` e `env.database` iguais ao fluxo síncrono.
-- [x] 2025-12-05: `connectAsync`/`_buildLogin` passaram a aceitar `cafile`, `SecurityContext`, `validateHost` e `encLoginOnly`, adicionando o helper `buildLoginForTesting` e testes unitários para garantir que os flags de criptografia sejam configurados corretamente.
-- [x] 2025-12-05: `connectSync` agora expõe os mesmos parâmetros TLS (cafile/securityContext/validateHost/encLoginOnly) e falha com `NotSupportedError` direcionando para `connectAsync`, garantindo paridade de API enquanto o transporte síncrono não suporta SecureSocket.
-- [x] 2025-12-05: Criada infraestrutura de negociação TLS no `AsyncTdsSession`, com interface genérica `AsyncTlsTransport`, testes unitários (`async_tls_negotiation_test.dart`) e `upgradeToSecureSocket` exposto para fakes/mocks, preparando o port do `pytds/tls.py` e validando o fluxo de `encrypt_flag` antes de integrar o handshake real.
-- [x] 2025-12-05: Disponibilizado `TdsCursor` síncrono (execute/fetchone/fetchall/nextset) construído sobre `TdsSession`, exposto por `TdsSocket.cursor()` e exportado em `mssql_dart.dart`.
-- [x] 2025-12-05: Criado `test/integration/dart_cursor_workflow_test.dart` cobrindo criação/alteração/remoção de tabelas temporárias, múltiplos INSERT/UPDATE/DELETE em sequência e validação explícita de `nextset` com múltiplos result sets.
-- [x] 2025-12-05: `_TdsSession` ganhou esqueleto de RPC (`submitRpc`/`processRpc`/`completeRpc`/`findReturnStatus`) e agora parseia tokens `RETURNVALUE`; suporte a parâmetros continua bloqueado até que `SerializerFactory` produza `TYPE_INFO` + valores reais.
-- [x] 2025-12-05: Implementada camada DB-API mínima (`DbConnection`/`DbCursor`) com helper `dbConnectSync`, reaproveitando `TdsCursor` para expor `execute`/`fetch*`/`nextset` de maneira amigável ao usuário.
-- [x] 2025-12-05: Novo `test/integration/dbapi_workflow_test.dart` cobre `DbConnection.execute`, workflows DDL/DML via `DbCursor` e navegação com `nextset`.
-- [x] 2025-12-05: Criado equivalente assíncrono (`AsyncDbConnection`/`AsyncDbCursor`) reutilizando `AsyncTdsSession`, garantindo serialização via `runSerial` e adicionando `dbConnectAsync`.
-- [x] 2025-12-05: Adicionadas baterias de testes para o DB-API assíncrono (`async_dbapi_workflow_test.dart`), incluindo verificação de `nextset` e serialização de execuções concorrentes.
-- [x] 2025-12-05: `TdsCursor`/`AsyncTdsCursor` e respective DB-APIs ganharam `executemany` com acumulação de `rowcount`, aceitando listas ou mapas de parâmetros.
-- [x] 2025-12-07: Corrigido bug de integração no `SecureSocketOpenSSLAsync.recv` que causava travamento em conexões TLS mid-stream.
-    - **Problema:** O Dart lia mais dados do OpenSSL (`SSL_read` com buffer fixo de 16KB) do que o solicitado pelo chamador (ex: 8 bytes). O excesso de dados decriptados era descartado, pois o `recv` não mantinha estado do buffer. Isso difere do Python, onde o `recv` passa o tamanho exato para o OpenSSL, que gerencia o buffer interno de dados decriptados.
-    - **Correção:** `SecureSocketOpenSSLAsync.recv` agora limita o `SSL_read` ao tamanho exato solicitado (`bufferSize - builder.length`). Adicionado `recvAvailable` às interfaces de transporte (`AsyncTransportProtocol`, `AsyncSocketTransport`, `AsyncTdsReader`, `OpenSslEncryptedSocket`, `PureDartEncryptedSocket`) para permitir que o `TdsTlsIoBridge` consulte dados disponíveis sem forçar leituras bloqueantes desnecessárias.
-    - **Resultado:** O teste de integração `open_ssl_encrypted_socket_test.dart` agora passa, alinhando o comportamento com o driver Python.
-- [x] 2025-12-07: Substituído o sistema de logs ad-hoc (prints) pelo pacote `logging`.
-    - **Mudança:** Adicionada dependência `logging` em `tlslite` e `mssql_dart`. Refatorados `SecureSocketOpenSSLAsync` e `TdsTlsIoBridge` para usar `Logger`.
-    - **Configuração:** O teste `open_ssl_encrypted_socket_test.dart` agora configura o logger via variável de ambiente `MSSQL_DART_DEBUG`, permitindo saída detalhada sob demanda.
-- [x] 2025-12-07: `_handleEncryptionNegotiation` agora rejeita `encrypt=false` quando o servidor responde `ENCRYPT_ON/REQ`, levantando `OperationalError` antes de tentar o handshake e alinhando o teste `async_tls_negotiation_test.dart` com o comportamento esperado.
-- [x] 2025-12-07: Removido `test/integration/python_trace_test.dart` para eliminar a dependência direta de Python durante `dart test`; os cenários de TLS reais (`pure_dart_encrypted_socket_test.dart` e `tls_encrypted_socket_test.dart`) voltaram a executar por padrão, assumindo que o SQL Server com TLS está disponível no ambiente de CI/desenvolvimento.
-- [ ] Próximo ciclo (quebrado em etapas):
-	1. Portar `pytds/tls.py` (`establish_channel`/`revert_to_clear`), usando `SecureSocket` ou wrapper síncrono e expondo swap de transporte em `SocketTransport`.
-	2. Completar `_TdsSession`: escrever parâmetros RPC reais (TYPE_INFO + payload via `SerializerFactory`), liberar parâmetros de saída/byref, cancelamentos e transações.
-	3. Finalizar serializers reais em `tds_types.dart`/`tds_base.dart` e ligá-los ao processamento de colunas/parâmetros.
-	4. Só então portar TLS avançado + MARS (`smp.py`) para destravar múltiplas sessões simultâneas.
-	5. Usar os traces (Python x Dart) para validar ordem de tokens/tipos e alimentar os testes de integração antes de liberar parsing de linhas reais.
-	6. Portar a camada DB-API de `pytds.connection`/`pytds.cursor`: conexões com autocommit/isolation level, `Cursor.execute`/`callproc`, `get_proc_outputs`, streaming de resultados, `copy_to` e contexto `with` (precisa de uma API pública equivalente ao `pytds.connect`).
-	7. Implementar pipeline completo de parâmetros/RPC igual ao `_TdsSession.execute` do Python: parametrização segura (`%s`/nomeados), `sp_executesql`, `InternalProc`, saída/entrada, `return_status`, table-valued parameters e `executemany` batching.
-	8. Portar utilidades de pool/reuso e roteamento: `connection_pool.py`, `LoadBalancer`, failover partner, integração com `connection_pool.connection_pool` e `NonMarsConnection`/`MarsConnection`.
-	9. Implementar `SmpManager`/MARS de `pytds.smp` + `tds_socket.create_session`, liberando múltiplos cursores simultâneos e cancelamentos independentes.
-	10. Reproduzir autenticações e integrações extras do `pytds` clássico: `sspi.py`/`login.py` (SSPI/Ntlm/Kerberos), `instance_browser_client.py` (descoberta de instâncias), `extensions.py` (adaptações Django) e helpers como `pytds.row_strategies` avançados (namedtuple/recordtype).
+- Autenticação Windows (NTLM/Kerberos/SSPI) e Microsoft Entra ID (Azure AD).
+- Table-valued parameters.
+- Bulk copy (BULK INSERT pelo protocolo).
+- MARS (`smp.py` do pytds).
+- TDS 8.0 (strict encryption, TLS antes do PRELOGIN).
+- Validação de certificado no backend OpenSSL (hoje só no tlslite).
+- Teste do redirecionamento do Azure com TLS (hoje o gateway falso dos testes
+  é sem TLS, então a validação contra o host de destino não está coberta).

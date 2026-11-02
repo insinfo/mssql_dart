@@ -1,35 +1,29 @@
 import 'dart:async';
 
-/// Pequeno utilitário para serializar operações assíncronas.
+/// Serializes asynchronous operations in arrival order (FIFO).
 ///
-/// Inspirado na estratégia de fila usada pelo `postgresql-dart` para impedir
-/// que múltiplos comandos usem o mesmo canal simultaneamente. Permite
-/// reentrância: chamadas realizadas enquanto a mesma operação estiver ativa
-/// executam imediatamente, evitando deadlocks ao chamar APIs internas.
+/// It is reentrant only for the current holder: calls made from inside
+/// [synchronized] (in the same asynchronous flow, identified by a [Zone])
+/// run immediately; any other call waits its turn, even if it arrives while
+/// the holder is waiting on I/O.
 class AsyncOperationLock {
   AsyncOperationLock();
 
+  final Object _zoneKey = Object();
   Future<void> _tail = Future<void>.value();
-  int _depth = 0;
 
-  /// Executa [action] garantindo que nenhuma outra operação protegida rode
-  /// simultaneamente. Se a chamada ocorrer durante outra operação já ativa,
-  /// ela é executada imediatamente (reentrante) para permitir composições.
+  /// Whether the current flow already holds the lock.
+  bool get isHeldByCurrentZone => Zone.current[_zoneKey] == true;
+
   Future<T> synchronized<T>(Future<T> Function() action) {
-    if (_depth > 0) {
+    if (isHeldByCurrentZone) {
       return action();
     }
     final previous = _tail;
-    final completer = Completer<void>();
-    _tail = previous.whenComplete(() => completer.future);
-    return previous.then((_) async {
-      _depth += 1;
-      try {
-        return await action();
-      } finally {
-        _depth -= 1;
-        completer.complete();
-      }
-    });
+    final done = Completer<void>();
+    _tail = done.future;
+    return previous.then((_) {
+      return runZoned(action, zoneValues: {_zoneKey: true});
+    }).whenComplete(done.complete);
   }
 }

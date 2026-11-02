@@ -8,24 +8,25 @@ import 'tds_base.dart' as tds;
 
 const _tdsHeaderSize = 8;
 
-/// Representa metadados mínimos de um pacote de resposta TDS.
+/// Minimal metadata of a TDS response packet.
 class ResponseMetadata {
   final int type;
   final int spid;
   const ResponseMetadata({required this.type, required this.spid});
 }
 
-/// Estrutura auxiliar para retornar um pedaço do buffer interno sem cópia.
+/// Helper that exposes a slice of the internal buffer without copying.
 class ReadBuffer {
   final Uint8List buffer;
   final int offset;
   final int length;
   const ReadBuffer(this.buffer, this.offset, this.length);
 
-  ByteData asByteData() => ByteData.sublistView(buffer, offset, offset + length);
+  ByteData asByteData() =>
+      ByteData.sublistView(buffer, offset, offset + length);
 }
 
-/// Implementação do leitor de pacotes TDS (porta direta do pytds).
+/// TDS packet reader (a direct port of pytds).
 class TdsReader implements tds.TransportProtocol {
   TdsReader({
     required tds.TransportProtocol transport,
@@ -76,7 +77,7 @@ class TdsReader implements tds.TransportProtocol {
   ResponseMetadata beginResponse() {
     if (_status != 1 && _pos < _size) {
       throw StateError(
-        'beginResponse chamado antes de consumir o pacote anterior',
+        'beginResponse called before the previous packet was consumed',
       );
     }
     _readPacket();
@@ -179,7 +180,7 @@ class TdsReader implements tds.TransportProtocol {
 
   @override
   void sendall(List<int> buf, {int flags = 0}) {
-    throw UnsupportedError('TdsReader é somente leitura');
+    throw UnsupportedError('TdsReader is read-only');
   }
 
   @override
@@ -227,7 +228,7 @@ class TdsReader implements tds.TransportProtocol {
     while (offset < _size) {
       final chunk = _transport.recv(_size - offset);
       if (chunk.isEmpty) {
-        throw tds.ClosedConnectionError();
+        throw tds.ClosedConnectionException();
       }
       _buf.setRange(offset, offset + chunk.length, chunk);
       offset += chunk.length;
@@ -247,12 +248,14 @@ class TdsReader implements tds.TransportProtocol {
       _pos += size;
       return ReadBuffer(_buf, offset, size);
     }
-    final builder = BytesBuilder(copy: false);
+    // Copy: the next packet is read into the same buffer and would overwrite
+    // a view of the bytes already collected.
+    final builder = BytesBuilder(copy: true);
     var remaining = size;
     while (remaining > 0) {
       if (_pos >= _size) {
         if (_status == 1) {
-          throw tds.ClosedConnectionError();
+          throw tds.ClosedConnectionException();
         }
         _readPacket();
         continue;
@@ -279,7 +282,7 @@ class TdsReader implements tds.TransportProtocol {
   }
 }
 
-/// Versão assíncrona do leitor de pacotes TDS.
+/// Asynchronous TDS packet reader.
 class AsyncTdsReader implements tds.AsyncTransportProtocol {
   AsyncTdsReader({
     required tds.AsyncTransportProtocol transport,
@@ -301,10 +304,10 @@ class AsyncTdsReader implements tds.AsyncTransportProtocol {
   int? _type;
   int _spid = 0;
 
-  /// Obtém o transporte atual.
+  /// The current transport.
   tds.AsyncTransportProtocol get transport => _transport;
-  
-  /// Define um novo transporte (usado para TLS upgrade).
+
+  /// Replaces the transport (used for the TLS upgrade).
   void setTransport(tds.AsyncTransportProtocol value) {
     _transport = value;
   }
@@ -338,7 +341,7 @@ class AsyncTdsReader implements tds.AsyncTransportProtocol {
   Future<ResponseMetadata> beginResponse() async {
     if (_status != 1 && _pos < _size) {
       throw StateError(
-        'beginResponse chamado antes de consumir o pacote anterior',
+        'beginResponse called before the previous packet was consumed',
       );
     }
     await _readPacket();
@@ -351,16 +354,14 @@ class AsyncTdsReader implements tds.AsyncTransportProtocol {
 
   Future<ReadBuffer> readFast(int size) => _readExact(size);
 
+  /// Reads [size] bytes. The result is always a copy, because the packet
+  /// buffer is reused for the next packet.
   Future<Uint8List> readBytes(int size) async {
     final slice = await _readExact(size);
-    if (slice.offset == 0 && slice.length == slice.buffer.length) {
+    if (!identical(slice.buffer, _buf)) {
       return slice.buffer;
     }
-    return Uint8List.sublistView(
-      slice.buffer,
-      slice.offset,
-      slice.offset + slice.length,
-    );
+    return slice.buffer.sublist(slice.offset, slice.offset + slice.length);
   }
 
   Future<int> getByte() async {
@@ -441,7 +442,7 @@ class AsyncTdsReader implements tds.AsyncTransportProtocol {
 
   @override
   Future<void> sendAll(List<int> data, {int flags = 0}) async {
-    throw UnsupportedError('AsyncTdsReader é somente leitura');
+    throw UnsupportedError('AsyncTdsReader is read-only');
   }
 
   @override
@@ -482,7 +483,7 @@ class AsyncTdsReader implements tds.AsyncTransportProtocol {
   Future<void> _readPacket() async {
     final headerBytes = await _transport.recv(_tdsHeaderSize);
     if (headerBytes.length < _tdsHeaderSize) {
-      throw tds.ClosedConnectionError();
+      throw tds.ClosedConnectionException();
     }
     _ensureCapacity(_tdsHeaderSize);
     _buf.setRange(0, _tdsHeaderSize, headerBytes);
@@ -497,7 +498,7 @@ class AsyncTdsReader implements tds.AsyncTransportProtocol {
     while (offset < _size) {
       final chunk = await _transport.recv(_size - offset);
       if (chunk.isEmpty) {
-        throw tds.ClosedConnectionError();
+        throw tds.ClosedConnectionException();
       }
       _buf.setRange(offset, offset + chunk.length, chunk);
       offset += chunk.length;
@@ -505,6 +506,57 @@ class AsyncTdsReader implements tds.AsyncTransportProtocol {
     _pos = _tdsHeaderSize;
     if (payloadLength == 0 && _status == 0) {
       await _readPacket();
+    }
+  }
+
+  /// Buffer of the current packet, for synchronous decoding ([ByteCursor]).
+  Uint8List get rawBuffer => _buf;
+
+  /// Read position within [rawBuffer].
+  int get position => _pos;
+  set position(int value) => _pos = value;
+
+  /// End of the valid data in [rawBuffer].
+  int get limit => _size;
+
+  /// Reads the next packet of the same message and appends it to the bytes
+  /// not yet consumed, which are moved to the start of the buffer. Earlier
+  /// views of [rawBuffer] become invalid.
+  Future<void> appendNextPacket() async {
+    if (_status == 1) {
+      throw tds.InterfaceException(
+          'Server response ended in the middle of a token');
+    }
+    final header = await _transport.recv(_tdsHeaderSize);
+    if (header.length < _tdsHeaderSize) {
+      throw tds.ClosedConnectionException();
+    }
+    final headerView = ByteData.sublistView(header);
+    final packetSize = headerView.getUint16(2, Endian.big);
+    final payload = packetSize - _tdsHeaderSize;
+    if (payload < 0) {
+      throw tds.InterfaceException('Invalid packet size: $packetSize');
+    }
+    final remaining = _size - _pos;
+    if (remaining + payload > _buf.length) {
+      final grown = Uint8List(math.max(remaining + payload, _buf.length * 2));
+      grown.setRange(0, remaining, _buf, _pos);
+      _buf = grown;
+    } else if (_pos > 0) {
+      _buf.setRange(0, remaining, _buf, _pos);
+    }
+    _pos = 0;
+    _size = remaining;
+    _type = headerView.getUint8(0);
+    _status = headerView.getUint8(1);
+    _spid = headerView.getUint16(4, Endian.big);
+    while (_size < remaining + payload) {
+      final chunk = await _transport.recv(remaining + payload - _size);
+      if (chunk.isEmpty) {
+        throw tds.ClosedConnectionException();
+      }
+      _buf.setRange(_size, _size + chunk.length, chunk);
+      _size += chunk.length;
     }
   }
 
@@ -517,12 +569,14 @@ class AsyncTdsReader implements tds.AsyncTransportProtocol {
       _pos += size;
       return ReadBuffer(_buf, offset, size);
     }
-    final builder = BytesBuilder(copy: false);
+    // Copy: the next packet is read into the same buffer and would overwrite
+    // a view of the bytes already collected.
+    final builder = BytesBuilder(copy: true);
     var remaining = size;
     while (remaining > 0) {
       if (_pos >= _size) {
         if (_status == 1) {
-          throw tds.ClosedConnectionError();
+          throw tds.ClosedConnectionException();
         }
         await _readPacket();
         continue;

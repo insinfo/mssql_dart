@@ -3,9 +3,10 @@ import 'dart:collection';
 
 import 'tds_base.dart' as tds;
 import 'async_tds_session.dart';
+import 'placeholders.dart';
 
-/// Cursor assíncrono inspirado no DB-API. Mantém o controle do estado
-/// atual do `AsyncTdsSession` enquanto executa comandos sequenciais.
+/// Asynchronous cursor modeled on the DB-API. Tracks the current state of
+/// the `AsyncTdsSession` while running sequential commands.
 class AsyncTdsCursor {
   AsyncTdsCursor(this._session);
 
@@ -16,6 +17,16 @@ class AsyncTdsCursor {
   int? _rowcountOverride;
 
   tds.Results? get description => _session.results;
+
+  /// Whether the cursor is positioned on a result set not yet fully read.
+  bool get hasCurrentResult => _hasCurrentResult;
+
+  /// OUTPUT parameters returned by the last command (see
+  /// [AsyncTdsSession.outputParameters]).
+  Map<String, Object?> get outputParameters => _session.outputParameters;
+
+  /// `RETURN` value of the procedure called by the last command.
+  int? get returnStatus => _session.returnStatus;
   int get rowcount => _rowcountOverride ?? _session.rowsAffected;
   bool get isIdle => _session.state == tds.TDS_IDLE;
 
@@ -23,15 +34,43 @@ class AsyncTdsCursor {
     String sql, {
     List<dynamic>? params,
     Map<String, dynamic>? namedParams,
+    PlaceholderIdentifier placeholderIdentifier = PlaceholderIdentifier.atSign,
   }) async {
+    sql = prepareSql(sql, placeholderIdentifier, params, namedParams);
     _rowcountOverride = null;
     await _finishActiveRequest();
+    // Another cursor may have left a half-read response on the same session.
+    await _session.drainPending();
     final bindings = _buildBindings(params, namedParams);
     if (bindings.isEmpty) {
       await _session.submitPlainQuery(sql);
     } else {
       await _session.submitExecSql(sql, bindings);
     }
+    await _positionOnFirstResult();
+  }
+
+  /// Calls the procedure [name] via RPC, with positional [params] and/or
+  /// [namedParams].
+  Future<void> callproc(
+    String name, {
+    List<dynamic>? params,
+    Map<String, dynamic>? namedParams,
+  }) async {
+    _rowcountOverride = null;
+    await _finishActiveRequest();
+    await _session.drainPending();
+    final list = <(String, Object?)>[
+      if (params != null)
+        for (final value in params) ('', value),
+      if (namedParams != null)
+        for (final entry in namedParams.entries) (entry.key, entry.value),
+    ];
+    await _session.submitProcedureCall(name, list);
+    await _positionOnFirstResult();
+  }
+
+  Future<void> _positionOnFirstResult() async {
     await _session.beginResponse();
     _hasPendingCommand = true;
     await _session.findResultOrDone();
@@ -42,53 +81,79 @@ class AsyncTdsCursor {
     }
   }
 
-  /// Executa a mesma instrução múltiplas vezes, aceitando listas ou mapas de
-  /// parâmetros para cada item fornecido pelo iterável.
-  Future<void> executemany(String sql, Iterable<dynamic> paramSets) async {
+  /// Executes the same statement once per item of [paramSets], each item
+  /// being a list or a map of parameters.
+  ///
+  /// Items are sent in RPC batches ([AsyncTdsSession.executeRpcBatch]) of up
+  /// to [batchSize] items per message; with `batchSize: 1` each item is a
+  /// separate request and execution stops at the first error.
+  Future<void> executemany(
+    String sql,
+    Iterable<dynamic> paramSets, {
+    PlaceholderIdentifier placeholderIdentifier = PlaceholderIdentifier.atSign,
+    int batchSize = 1000,
+  }) async {
     _rowcountOverride = null;
     await _finishActiveRequest();
+    await _session.drainPending();
     var total = 0;
     var canAggregate = true;
-    var hadAny = false;
+    String? prepared;
+    final chunk = <Map<String, dynamic>>[];
 
-    for (final params in paramSets) {
-      hadAny = true;
-      if (params == null) {
-        await execute(sql);
-      } else if (params is List<dynamic>) {
-        await execute(sql, params: params);
-      } else if (params is Map<String, dynamic>) {
-        await execute(sql, namedParams: params);
-      } else {
-        throw tds.InterfaceError(
-          'executemany aceita apenas listas ou mapas de parâmetros',
-        );
-      }
-      final count = _session.rowsAffected;
-      if (count == tds.TDS_NO_COUNT) {
+    Future<void> flush() async {
+      if (chunk.isEmpty) return;
+      final count = batchSize <= 1 && chunk.length == 1
+          ? await _executeSingle(prepared!, chunk.first)
+          : await _session.executeRpcBatch(prepared!, chunk);
+      chunk.clear();
+      if (count == null) {
         canAggregate = false;
-      } else if (canAggregate) {
+      } else {
         total += count;
       }
     }
 
-    if (!hadAny) {
-      _open = false;
-      _hasPendingCommand = false;
-      _rowcountOverride = 0;
-      return;
+    for (final params in paramSets) {
+      final (list, map) = switch (params) {
+        null => (null, null),
+        List<dynamic> list => (list, null),
+        Map<String, dynamic> map => (null, map),
+        _ => throw tds.InterfaceException(
+            'executemany accepts only lists or maps of parameters',
+          ),
+      };
+      // Validate every item; the `?` conversion is the same for all of them.
+      prepared = prepareSql(sql, placeholderIdentifier, list, map);
+      chunk.add(_buildBindings(list, map));
+      if (chunk.length >= batchSize) await flush();
     }
+    await flush();
+    _open = false;
+    _hasCurrentResult = false;
+    // As after execute(): fetch* returns empty instead of failing.
+    _hasPendingCommand = true;
+    _session.clearRowBuffer();
+    _rowcountOverride = canAggregate ? total : null;
+  }
 
-    if (canAggregate) {
-      _rowcountOverride = total;
+  /// Runs one [executemany] item as its own request.
+  Future<int?> _executeSingle(String sql, Map<String, dynamic> bindings) async {
+    if (bindings.isEmpty) {
+      await _session.submitPlainQuery(sql);
     } else {
-      _rowcountOverride = null;
+      await _session.submitExecSql(sql, bindings);
     }
+    await _positionOnFirstResult();
+    await _finishActiveRequest();
+    final count = _session.rowsAffected;
+    return count == tds.TDS_NO_COUNT ? null : count;
   }
 
   Future<dynamic> fetchone() async {
     if (!_hasPendingCommand) {
-      throw tds.InterfaceError('execute() precisa ser chamado antes de fetchone().');
+      throw tds.InterfaceException(
+          'execute() must be called before fetchone().');
     }
     if (!_hasCurrentResult) {
       if (!_open) {
@@ -112,7 +177,8 @@ class AsyncTdsCursor {
 
   Future<List<dynamic>> fetchall() async {
     if (!_hasPendingCommand) {
-      throw tds.InterfaceError('execute() precisa ser chamado antes de fetchall().');
+      throw tds.InterfaceException(
+          'execute() must be called before fetchall().');
     }
     if (!_hasCurrentResult) {
       if (!_open) {
@@ -138,7 +204,8 @@ class AsyncTdsCursor {
 
   Future<bool> nextset() async {
     if (!_hasPendingCommand) {
-      throw tds.InterfaceError('execute() precisa ser chamado antes de nextset().');
+      throw tds.InterfaceException(
+          'execute() must be called before nextset().');
     }
     final next = await _session.nextSet();
     if (next == true) {
@@ -152,6 +219,14 @@ class AsyncTdsCursor {
     _hasPendingCommand = false;
     _session.clearRowBuffer();
     return false;
+  }
+
+  /// Discards whatever remains of the current response, freeing the session.
+  Future<void> close() async {
+    _open = false;
+    _hasCurrentResult = false;
+    _hasPendingCommand = false;
+    await _session.drainPending();
   }
 
   Future<void> _finishActiveRequest() async {
@@ -198,8 +273,8 @@ class AsyncTdsCursor {
       named.forEach((key, value) {
         final normalized = key.startsWith('@') ? key : '@$key';
         if (bindings.containsKey(normalized)) {
-          throw tds.InterfaceError(
-            'Parâmetro $normalized definido mais de uma vez',
+          throw tds.InterfaceException(
+            'Parameter $normalized defined more than once',
           );
         }
         bindings[normalized] = value;
