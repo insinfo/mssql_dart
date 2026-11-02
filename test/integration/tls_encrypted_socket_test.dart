@@ -116,8 +116,11 @@ void main() {
     });
 
     test('connectAsync with a wrong port fails gracefully', () async {
-      expect(
-        () => connectAsync(
+      // Linux refuses the connection at once; Windows retries the SYN for
+      // about 2 s, so the connect deadline may expire first. Either way the
+      // call must fail quickly with an OperationalException naming the target.
+      await expectLater(
+        connectAsync(
           cafile: testCa,
           trustServerCertificate: testTrustServerCertificate,
           host: host,
@@ -128,11 +131,8 @@ void main() {
           encrypt: true,
           timeout: const Duration(seconds: 2),
         ),
-        throwsA(
-          predicate((e) =>
-              e is Exception &&
-              e.toString().contains('Failed to connect to localhost:9999')),
-        ),
+        throwsA(isA<OperationalException>()
+            .having((e) => e.message, 'message', contains('localhost:9999'))),
       );
     });
   });
